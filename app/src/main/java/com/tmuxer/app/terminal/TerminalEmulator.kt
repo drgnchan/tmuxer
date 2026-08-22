@@ -39,7 +39,8 @@ data class TerminalCell(
     var background: Int = TERMINAL_DEFAULT_BACKGROUND,
     var bold: Boolean = false,
     var underline: Boolean = false,
-    var inverse: Boolean = false
+    var inverse: Boolean = false,
+    var hyperlink: String? = null
 ) {
     fun duplicate() = copy()
 }
@@ -121,6 +122,7 @@ class TerminalEmulator(
     private var bold = false
     private var underline = false
     private var inverse = false
+    private var activeHyperlink: String? = null
 
     private var parserState = ParserState.NORMAL
     private val sequence = StringBuilder()
@@ -225,6 +227,7 @@ class TerminalEmulator(
             activeCharsetSlot = 0
             pendingUtf8 = EMPTY_BYTE_ARRAY
             pendingHighSurrogate = null
+            activeHyperlink = null
             kittySequenceOverflow = false
             pendingKittyTransmission = null
             terminalImages.clear()
@@ -275,6 +278,7 @@ class TerminalEmulator(
             target.bold = source.bold
             target.underline = source.underline
             target.inverse = source.inverse
+            target.hyperlink = source.hyperlink
         }
 
         if (viewportOffset > 0) {
@@ -391,13 +395,23 @@ class TerminalEmulator(
             ParserState.CSI -> processCsi(char)
             ParserState.OSC -> {
                 when (char) {
-                    '\u0007' -> parserState = ParserState.NORMAL
+                    '\u0007' -> {
+                        processOsc(sequence.toString())
+                        sequence.clear()
+                        parserState = ParserState.NORMAL
+                    }
                     '\u001B' -> parserState = ParserState.OSC_ESCAPE
                     else -> if (sequence.length < 1024) sequence.append(char)
                 }
             }
             ParserState.OSC_ESCAPE -> {
-                parserState = if (char == '\\') ParserState.NORMAL else ParserState.OSC
+                if (char == '\\') {
+                    processOsc(sequence.toString())
+                    sequence.clear()
+                    parserState = ParserState.NORMAL
+                } else {
+                    parserState = ParserState.OSC
+                }
             }
             ParserState.APC -> {
                 if (char == '\u001B') {
@@ -610,6 +624,12 @@ class TerminalEmulator(
             // servers that reply is forwarded to the pane and appears as literal "?1;2c" input.
         }
         if (command !in charArrayOf('m', 'h', 'l')) wrapPending = false
+    }
+
+    private fun processOsc(raw: String) {
+        if (!raw.startsWith("8;")) return
+        val parts = raw.split(';', limit = 3)
+        if (parts.size == 3) activeHyperlink = parts[2].takeIf { it.isNotEmpty() }
     }
 
     private fun processKittyGraphics(raw: String) {
@@ -850,8 +870,12 @@ class TerminalEmulator(
             cell.bold = bold
             cell.underline = underline
             cell.inverse = inverse
+            cell.hyperlink = activeHyperlink
             if (glyphWidth == 2) {
-                cells[index(cursorColumn + 1, cursorRow)] = blankCell().apply { width = 0 }
+                cells[index(cursorColumn + 1, cursorRow)] = blankCell().apply {
+                    width = 0
+                    hyperlink = activeHyperlink
+                }
             }
         }
         cursorColumn += glyphWidth

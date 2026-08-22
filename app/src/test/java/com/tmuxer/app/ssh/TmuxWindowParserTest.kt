@@ -40,6 +40,12 @@ class TmuxWindowParserTest {
                 "/home/raymond/.cache/tmuxer/pi-w7.stream.images/$hash.png"
             )
         )
+        assertTrue(
+            isAllowedTerminalImagePath(
+                "/home/raymond",
+                "/home/raymond/.cache/tmuxer/pi-w7.images/$hash.webp"
+            )
+        )
         assertFalse(
             isAllowedTerminalImagePath(
                 "/home/raymond",

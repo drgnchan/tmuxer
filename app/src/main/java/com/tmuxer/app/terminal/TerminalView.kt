@@ -43,6 +43,7 @@ private const val RESIZE_SETTLE_DELAY_MILLIS = 64L
 private const val PERF_TAG = "TmuxerPerf"
 private const val MAX_DECODED_IMAGE_PIXELS = 8_000_000L
 private const val MAX_DECODED_IMAGE_DIMENSION = 4_096
+private const val TERMINAL_IMAGE_LINK_PREFIX = "tmuxer-image://"
 
 /** A decoded image retained only while its fullscreen preview is open. */
 data class TerminalImagePreview(
@@ -65,6 +66,17 @@ private data class TerminalTextSelection(
     val anchorStart: Int,
     val anchorEnd: Int
 )
+
+internal fun terminalImagePathFromHyperlink(hyperlink: String?): String? {
+    if (hyperlink?.startsWith(TERMINAL_IMAGE_LINK_PREFIX) != true) return null
+    val encodedPath = hyperlink.removePrefix(TERMINAL_IMAGE_LINK_PREFIX)
+    if (encodedPath.isEmpty() || encodedPath.length > 8_192) return null
+    return runCatching {
+        String(java.util.Base64.getUrlDecoder().decode(encodedPath), Charsets.UTF_8)
+    }.getOrNull()?.takeIf {
+        it.startsWith('/') && it.length <= 4_096 && '\u0000' !in it
+    }
+}
 
 internal fun decodeTerminalImagePreview(data: ByteArray): Bitmap? {
     if (data.isEmpty()) return null
@@ -303,6 +315,7 @@ class TerminalView @JvmOverloads constructor(
     }
 
     private fun drawSnapshot(canvas: Canvas, snapshot: TerminalSnapshot) {
+        imageHitTargets.clear()
         for (row in 0 until snapshot.rows) {
             val rowOffset = row * snapshot.columns
             val top = verticalPadding + row * lineHeight
@@ -347,16 +360,31 @@ class TerminalView @JvmOverloads constructor(
                 }
 
                 val start = column
-                val foreground = if (cell.inverse) cell.background else cell.foreground
+                val imageLink = terminalImagePathFromHyperlink(cell.hyperlink) != null
+                val foreground = if (imageLink) {
+                    terminalTheme.cursorColor
+                } else if (cell.inverse) {
+                    cell.background
+                } else {
+                    cell.foreground
+                }
                 val bold = cell.bold
-                val underline = cell.underline
+                val underline = cell.underline || imageLink
                 var hasVisibleText = false
                 textRun.clear()
                 while (column < snapshot.columns) {
                     val next = snapshot.cells[rowOffset + column]
-                    val nextForeground = if (next.inverse) next.background else next.foreground
+                    val nextImageLink = terminalImagePathFromHyperlink(next.hyperlink) != null
+                    val nextForeground = if (nextImageLink) {
+                        terminalTheme.cursorColor
+                    } else if (next.inverse) {
+                        next.background
+                    } else {
+                        next.foreground
+                    }
                     if (next.width != 1 || nextForeground != foreground ||
-                        next.bold != bold || next.underline != underline
+                        next.bold != bold || (next.underline || nextImageLink) != underline ||
+                        next.hyperlink != cell.hyperlink
                     ) {
                         break
                     }
@@ -392,6 +420,7 @@ class TerminalView @JvmOverloads constructor(
                 }
             }
         }
+        collectTerminalImageLinkTargets(snapshot)
         drawTerminalImages(canvas, snapshot)
         if (snapshot.cursorVisible && hasFocus()) {
             val left = horizontalPadding + snapshot.cursorColumn * characterWidth
@@ -424,7 +453,14 @@ class TerminalView @JvmOverloads constructor(
 
     private fun drawWideGlyph(canvas: Canvas, cell: TerminalCell, column: Int, baseline: Float) {
         if (cell.text == " ") return
-        val foreground = if (cell.inverse) cell.background else cell.foreground
+        val imageLink = terminalImagePathFromHyperlink(cell.hyperlink) != null
+        val foreground = if (imageLink) {
+            terminalTheme.cursorColor
+        } else if (cell.inverse) {
+            cell.background
+        } else {
+            cell.foreground
+        }
         val left = horizontalPadding + column * characterWidth
         val glyphWidth = characterWidth * cell.width
         textPaint.color = foreground
@@ -453,7 +489,7 @@ class TerminalView @JvmOverloads constructor(
         } else {
             canvas.drawText(cell.text, left, baseline, textPaint)
         }
-        if (cell.underline) {
+        if (cell.underline || imageLink) {
             backgroundPaint.color = foreground
             canvas.drawRect(
                 left,
@@ -465,8 +501,42 @@ class TerminalView @JvmOverloads constructor(
         }
     }
 
+    private fun collectTerminalImageLinkTargets(snapshot: TerminalSnapshot) {
+        for (row in 0 until snapshot.rows) {
+            var column = 0
+            while (column < snapshot.columns) {
+                val hyperlink = snapshot.cells[row * snapshot.columns + column].hyperlink
+                val remotePath = terminalImagePathFromHyperlink(hyperlink)
+                if (remotePath == null) {
+                    column++
+                    continue
+                }
+                val start = column
+                while (
+                    column < snapshot.columns &&
+                    snapshot.cells[row * snapshot.columns + column].hyperlink == hyperlink
+                ) {
+                    column++
+                }
+                imageHitTargets += TerminalImageHitTarget(
+                    bounds = RectF(
+                        horizontalPadding + start * characterWidth,
+                        verticalPadding + row * lineHeight,
+                        horizontalPadding + column * characterWidth,
+                        verticalPadding + (row + 1) * lineHeight
+                    ),
+                    request = TerminalImageOpenRequest(
+                        imageId = hyperlink.hashCode().toLong(),
+                        encodedData = ByteArray(0),
+                        remotePath = remotePath,
+                        mimeType = null
+                    )
+                )
+            }
+        }
+    }
+
     private fun drawTerminalImages(canvas: Canvas, snapshot: TerminalSnapshot) {
-        imageHitTargets.clear()
         snapshot.images.forEach { placement ->
             if (placement.row >= snapshot.rows || placement.column >= snapshot.columns) return@forEach
             val left = horizontalPadding + placement.column * characterWidth + placement.offsetX

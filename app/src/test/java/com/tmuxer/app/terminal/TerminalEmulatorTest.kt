@@ -22,6 +22,27 @@ class TerminalEmulatorTest {
     }
 
     @Test
+    fun keepsOsc8TerminalImageLinksOnTheirCells() {
+        val terminal = TerminalEmulator(30, 5)
+        val remotePath = "/home/test/.cache/tmuxer/pi-w7.images/" +
+            "0123456789abcdef".repeat(4) + ".png"
+        val encodedPath = java.util.Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(remotePath.toByteArray())
+        val hyperlink = "tmuxer-image://$encodedPath"
+
+        terminal.feed(
+            ("A\u001B[s\u001B]8;;$hyperlink\u001B\\图片\u001B]8;;\u001B\\\u001B[u").toByteArray()
+        )
+
+        val snapshot = terminal.snapshot()
+        assertEquals(1, snapshot.cursorColumn)
+        assertEquals(hyperlink, snapshot.cells[1].hyperlink)
+        assertEquals(hyperlink, snapshot.cells[2].hyperlink)
+        assertEquals(remotePath, terminalImagePathFromHyperlink(snapshot.cells[1].hyperlink))
+        assertEquals(null, snapshot.cells[0].hyperlink)
+    }
+
+    @Test
     fun reportsOneRowImageLinkGeometryToPi() {
         val replies = mutableListOf<String>()
         val terminal = TerminalEmulator(20, 5, reply = replies::add)

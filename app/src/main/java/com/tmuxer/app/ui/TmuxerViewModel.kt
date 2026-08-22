@@ -19,7 +19,6 @@ import com.tmuxer.app.ssh.PiNotInstalledException
 import com.tmuxer.app.ssh.RemoteDirectoryListing
 import com.tmuxer.app.ssh.SshManager
 import com.tmuxer.app.ssh.TmuxNotInstalledException
-import com.tmuxer.app.terminal.TERMINAL_IMAGE_LINK_CELL_SIZE_RESPONSE
 import com.tmuxer.app.terminal.TerminalEmulator
 import com.tmuxer.app.terminal.TerminalTheme
 import kotlinx.coroutines.CancellationException
@@ -92,9 +91,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     val terminal = TerminalEmulator(reply = { response ->
         sshManager.writeTerminal(response.toByteArray(Charsets.UTF_8))
     })
-    // tmux filters graphics sequences before drawing its client. App-created Pi panes retain a
-    // private lightweight reference stream; this shadow emulator follows its cursor and forwards
-    // image-link placement operations into the visible terminal.
+    // New Pi panes put OSC 8 image links directly in tmux's main output. Keep the shadow graphics
+    // parser only for workspaces created by older tmuxer versions that still expose a side stream.
     private val imageTerminal = TerminalEmulator(
         retainScreenContent = false
     ).apply {
@@ -499,14 +497,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                         }
                     }
                 )
-                if (generation == terminalGeneration) {
-                    if (captureImages) {
-                        // Pi queries pixel cell dimensions only at startup. Also send the compact
-                        // link geometry proactively so already-running workspaces reflow images.
-                        sshManager.writeTerminal(TERMINAL_IMAGE_LINK_CELL_SIZE_RESPONSE.toByteArray())
-                    }
-                    _terminalConnected.value = true
-                }
+                if (generation == terminalGeneration) _terminalConnected.value = true
             } catch (error: Throwable) {
                 if (generation == terminalGeneration) {
                     activeTerminalWindowId = null
