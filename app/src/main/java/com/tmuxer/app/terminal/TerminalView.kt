@@ -39,6 +39,7 @@ import kotlin.math.ceil
 import kotlin.math.floor
 
 private const val FLING_VELOCITY_SCALE = 0.48f
+private const val TERMINAL_LINE_SPACING_MULTIPLIER = 1.15f
 private const val RESIZE_SETTLE_DELAY_MILLIS = 64L
 private const val PERF_TAG = "TmuxerPerf"
 private const val MAX_DECODED_IMAGE_PIXELS = 8_000_000L
@@ -194,7 +195,11 @@ class TerminalView @JvmOverloads constructor(
     // Termux uses a representative monospace glyph and the font's own line spacing.
     private val characterWidth = textPaint.measureText("X")
     private val fontMetrics = textPaint.fontMetrics
-    private val lineHeight = textPaint.fontSpacing
+    private val baseLineHeight = textPaint.fontSpacing
+    // CJK glyphs fill much more of the em box than Ubuntu Mono. Extra leading prevents adjacent
+    // Chinese lines from visually touching while preserving a fixed terminal cell grid.
+    private val lineHeight = ceil(baseLineHeight * TERMINAL_LINE_SPACING_MULTIPLIER)
+    private val baselineOffset = -fontMetrics.ascent + (lineHeight - baseLineHeight) / 2f
     private val viewConfiguration = ViewConfiguration.get(context)
     private val touchSlop = viewConfiguration.scaledTouchSlop.toFloat()
     private val doubleTapSlop = viewConfiguration.scaledDoubleTapSlop.toFloat()
@@ -343,7 +348,10 @@ class TerminalView @JvmOverloads constructor(
         for (row in 0 until snapshot.rows) {
             val rowOffset = row * snapshot.columns
             val top = verticalPadding + row * lineHeight
-            val baseline = top - fontMetrics.ascent
+            // Fractional font spacing can leave a one-pixel seam between adjacent background rows.
+            val backgroundTop = floor(top)
+            val backgroundBottom = ceil(top + lineHeight)
+            val baseline = top + baselineOffset
 
             // Paint backgrounds as runs instead of issuing one draw call per terminal cell.
             var column = 0
@@ -362,9 +370,9 @@ class TerminalView @JvmOverloads constructor(
                     backgroundPaint.color = background
                     canvas.drawRect(
                         horizontalPadding + start * characterWidth,
-                        top,
+                        backgroundTop,
                         horizontalPadding + column * characterWidth + 0.5f,
-                        top + lineHeight,
+                        backgroundBottom,
                         backgroundPaint
                     )
                 }
