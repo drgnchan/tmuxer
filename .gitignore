@@ -1,0 +1,14 @@
+*.iml
+*.apk
+.gradle/
+.idea/
+.kotlin/
+local.properties
+.DS_Store
+build/
+**/build/
+captures/
+artifacts/
+dogfood-output/
+.externalNativeBuild/
+.cxx/

@@ -1,0 +1,175 @@
+package com.tmuxer.app.terminal
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertNotSame
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class TerminalEmulatorTest {
+    @Test
+    fun writesAndMovesCursor() {
+        val terminal = TerminalEmulator(20, 5)
+        terminal.feed("hello\r\nworld\u001B[2;10H!".toByteArray())
+
+        val snapshot = terminal.snapshot()
+        assertEquals("hello", row(snapshot, 0).take(5))
+        assertEquals("world    !", row(snapshot, 1).take(10))
+        assertEquals(10, snapshot.cursorColumn)
+        assertEquals(1, snapshot.cursorRow)
+    }
+
+    @Test
+    fun decodesUtf8SplitAcrossNetworkPackets() {
+        val terminal = TerminalEmulator(20, 5)
+        val bytes = "你".toByteArray(Charsets.UTF_8)
+        terminal.feed(bytes.copyOfRange(0, 2))
+        terminal.feed(bytes.copyOfRange(2, 3))
+
+        val cell = terminal.snapshot().cells[0]
+        assertEquals("你", cell.text)
+        assertEquals(2, cell.width)
+    }
+
+    @Test
+    fun reusesSnapshotStorageUntilGridDimensionsChange() {
+        val terminal = TerminalEmulator(20, 5)
+        terminal.feed("A".toByteArray())
+        val first = terminal.snapshot()
+
+        terminal.feed("B".toByteArray())
+        val reused = terminal.snapshot(first)
+        assertSame(first, reused)
+        assertEquals("AB", row(reused, 0).take(2))
+
+        terminal.resize(20, 6)
+        assertNotSame(first, terminal.snapshot(first))
+    }
+
+    @Test
+    fun rendersDecSpecialGraphicsUsedByPiBorders() {
+        val terminal = TerminalEmulator(20, 5)
+        terminal.feed("\u001B(0lqqk\u001B(B q".toByteArray())
+
+        assertEquals("┌──┐ q", row(terminal.snapshot(), 0).take(6))
+    }
+
+    @Test
+    fun supportsAlternateScreenAndRestoresMainScreen() {
+        val terminal = TerminalEmulator(20, 5)
+        terminal.feed("main".toByteArray())
+        terminal.feed("\u001B[?1049halt".toByteArray())
+        assertEquals("alt", row(terminal.snapshot(), 0).take(3))
+
+        terminal.feed("\u001B[?1049l".toByteArray())
+        assertEquals("main", row(terminal.snapshot(), 0).take(4))
+    }
+
+    @Test
+    fun ignoresPrivateKittyKeyboardRequestsInsteadOfRestoringCursor() {
+        val terminal = TerminalEmulator(20, 5)
+        terminal.feed("A\u001B[s\u001B[5C\u001B[>1uX".toByteArray())
+
+        assertEquals("A     X", row(terminal.snapshot(), 0).take(7))
+    }
+
+    @Test
+    fun doesNotInjectDeviceAttributesIntoRemoteInput() {
+        val replies = mutableListOf<String>()
+        val terminal = TerminalEmulator(20, 5, replies::add)
+        terminal.feed("\u001B[c".toByteArray())
+
+        assertEquals(emptyList<String>(), replies)
+    }
+
+    @Test
+    fun convertsTouchScrollToSgrMouseWheelForFullscreenApps() {
+        val replies = mutableListOf<String>()
+        val terminal = TerminalEmulator(20, 5, replies::add)
+        assertFalse(terminal.isMouseTrackingActive())
+        terminal.feed("\u001B[?1000h\u001B[?1006h".toByteArray())
+        assertTrue(terminal.isMouseTrackingActive())
+        terminal.scroll(rowsDown = 2, column = 4, row = 3)
+
+        assertEquals("\u001B[<65;4;3M\u001B[<65;4;3M", replies.single())
+        terminal.feed("\u001B[?1000l".toByteArray())
+        assertFalse(terminal.isMouseTrackingActive())
+    }
+
+    @Test
+    fun scrollsTmuxAlternateScreenLocallyWithoutChangingShellHistory() {
+        val replies = mutableListOf<String>()
+        val terminal = TerminalEmulator(20, 5, replies::add)
+        terminal.feed("\u001B[?1049h\u001B[1;4r".toByteArray())
+        terminal.feed((1..8).joinToString("") { "$it\r\n" }.toByteArray())
+
+        terminal.scroll(rowsDown = -2, column = 1, row = 1)
+
+        assertEquals(emptyList<String>(), replies)
+        assertEquals("4", row(terminal.snapshot(), 0).trim())
+    }
+
+    @Test
+    fun switchesDefaultPaletteWithoutOverwritingExplicitAnsiColors() {
+        val terminal = TerminalEmulator(20, 5)
+        terminal.feed("D\u001B[38;2;1;2;3mX".toByteArray())
+
+        terminal.setTheme(TerminalTheme.LIGHT)
+
+        val snapshot = terminal.snapshot()
+        assertEquals(TERMINAL_LIGHT_FOREGROUND, snapshot.cells[0].foreground)
+        assertEquals(TERMINAL_LIGHT_BACKGROUND, snapshot.cells[0].background)
+        assertEquals(0xFF010203.toInt(), snapshot.cells[1].foreground)
+        assertEquals(TERMINAL_LIGHT_BACKGROUND, snapshot.cells[1].background)
+        assertEquals(TerminalTheme.LIGHT, terminal.theme)
+    }
+
+    @Test
+    fun appliesAnsiColorAndErase() {
+        val terminal = TerminalEmulator(20, 5)
+        terminal.feed("\u001B[31mR\u001B[0mN".toByteArray())
+        val colored = terminal.snapshot()
+        assertNotEquals(colored.cells[0].foreground, colored.cells[1].foreground)
+
+        terminal.feed("\r\u001B[2K".toByteArray())
+        assertEquals("                    ", row(terminal.snapshot(), 0))
+    }
+
+    @Test
+    fun assemblesAndPlacesChunkedKittyImages() {
+        val terminal = TerminalEmulator(20, 8)
+        terminal.feed(
+            ("\u001B[3;5H" +
+                "\u001B_Ga=T,f=100,c=4,r=3,i=4294967294,C=1,m=1;aW1h\u001B\\" +
+                "\u001B_Gm=0;Z2U=\u001B\\").toByteArray()
+        )
+
+        val image = terminal.snapshot().images.single()
+        assertEquals(4294967294L, image.imageId)
+        assertEquals("image", image.encodedData.toString(Charsets.UTF_8))
+        assertEquals(4, image.column)
+        assertEquals(2, image.row)
+        assertEquals(4, image.columns)
+        assertEquals(3, image.rows)
+
+        terminal.feed("\u001B_Ga=d,d=a,q=2\u001B\\".toByteArray())
+        assertTrue(terminal.snapshot().images.isEmpty())
+
+        terminal.feed("\u001B[2;2H\u001B_Ga=p,q=2,i=4294967294,c=2,r=1\u001B\\".toByteArray())
+        val moved = terminal.snapshot().images.single()
+        assertEquals(1, moved.column)
+        assertEquals(1, moved.row)
+        assertEquals(2, moved.columns)
+        assertEquals(1, moved.rows)
+
+        terminal.feed("\u001B_Ga=d,d=I,i=4294967294,q=2\u001B\\".toByteArray())
+        assertTrue(terminal.snapshot().images.isEmpty())
+    }
+
+    private fun row(snapshot: TerminalSnapshot, row: Int): String =
+        (0 until snapshot.columns).joinToString("") {
+            snapshot.cells[row * snapshot.columns + it].text
+        }
+}
