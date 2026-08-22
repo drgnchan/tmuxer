@@ -1149,6 +1149,7 @@ private fun RemoteDirectoryPicker(
     var listing by remember { mutableStateOf<RemoteDirectoryListing?>(null) }
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
+    var showHiddenDirectories by remember { mutableStateOf(false) }
 
     fun load(path: String) {
         loading = true
@@ -1177,7 +1178,19 @@ private fun RemoteDirectoryPicker(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                Spacer(Modifier.height(10.dp))
+                TextButton(
+                    onClick = { showHiddenDirectories = !showHiddenDirectories },
+                    modifier = Modifier.align(Alignment.End)
+                ) {
+                    Icon(
+                        if (showHiddenDirectories) Icons.Rounded.VisibilityOff else Icons.Rounded.Visibility,
+                        null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text(if (showHiddenDirectories) "收起隐藏目录" else "显示隐藏目录")
+                }
+                Spacer(Modifier.height(2.dp))
                 when {
                     loading -> Box(
                         Modifier.fillMaxWidth().height(120.dp),
@@ -1205,7 +1218,9 @@ private fun RemoteDirectoryPicker(
                             modifier = Modifier.fillMaxWidth().heightIn(max = 310.dp),
                             verticalArrangement = Arrangement.spacedBy(4.dp)
                         ) {
-                            val directories = listing?.directories.orEmpty()
+                            val directories = listing?.directories.orEmpty().filter { path ->
+                                showHiddenDirectories || !path.substringAfterLast('/').startsWith('.')
+                            }
                             if (directories.isEmpty()) {
                                 item {
                                     Text(

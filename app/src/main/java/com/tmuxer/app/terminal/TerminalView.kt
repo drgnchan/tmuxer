@@ -67,6 +67,16 @@ private data class TerminalTextSelection(
     val anchorEnd: Int
 )
 
+private enum class TerminalSelectionHandle { START, END }
+
+private data class TerminalSelectionHandleGeometry(
+    val x: Float,
+    val anchorY: Float,
+    val centerY: Float,
+    val cellCenterX: Float,
+    val cellCenterY: Float
+)
+
 internal fun terminalImagePathFromHyperlink(hyperlink: String?): String? {
     if (hyperlink?.startsWith(TERMINAL_IMAGE_LINK_PREFIX) != true) return null
     val encodedPath = hyperlink.removePrefix(TERMINAL_IMAGE_LINK_PREFIX)
@@ -154,6 +164,11 @@ class TerminalView @JvmOverloads constructor(
         color = 0x6665DDA5
         style = Paint.Style.FILL
     }
+    private val selectionHandlePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = 0xFF65DDA5.toInt()
+        style = Paint.Style.FILL
+        strokeCap = Paint.Cap.ROUND
+    }
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val imageLinkBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
     private val imageLinkTextPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
@@ -173,6 +188,9 @@ class TerminalView @JvmOverloads constructor(
     @Volatile private var renderDirty = true
     private val horizontalPadding = 3f * density
     private val verticalPadding = 2f * density
+    private val selectionHandleRadius = 6f * density
+    private val selectionHandleStemLength = 4f * density
+    private val selectionHandleTouchRadius = 24f * density
     // Termux uses a representative monospace glyph and the font's own line spacing.
     private val characterWidth = textPaint.measureText("X")
     private val fontMetrics = textPaint.fontMetrics
@@ -207,6 +225,10 @@ class TerminalView @JvmOverloads constructor(
     private var lastTapY = 0f
     private var keyboardTapSuppressedUntil = 0L
     private var selectingWithTouch = false
+    private var selectionDraggedAfterLongPress = false
+    private var draggedSelectionHandle: TerminalSelectionHandle? = null
+    private var selectionHandleDragOffsetX = 0f
+    private var selectionHandleDragOffsetY = 0f
     private var textSelection: TerminalTextSelection? = null
     private var selectionActionMode: ActionMode? = null
     private var renderSamples = 0
@@ -220,6 +242,7 @@ class TerminalView @JvmOverloads constructor(
     private val beginLongPressSelection = Runnable {
         if (!movedBeyondTouchSlop && !scrolledWithFinger) {
             selectingWithTouch = performLongClick()
+            selectionDraggedAfterLongPress = false
         }
     }
 
@@ -312,6 +335,7 @@ class TerminalView @JvmOverloads constructor(
         }
         canvas.drawBitmap(bitmap, 0f, 0f, bitmapPaint)
         drawTextSelection(canvas, snapshot)
+        drawTextSelectionHandles(canvas, snapshot)
     }
 
     private fun drawSnapshot(canvas: Canvas, snapshot: TerminalSnapshot) {
@@ -449,6 +473,35 @@ class TerminalView @JvmOverloads constructor(
                 selectionPaint
             )
         }
+    }
+
+    private fun drawTextSelectionHandles(canvas: Canvas, snapshot: TerminalSnapshot) {
+        val selection = textSelection ?: return
+        if (snapshot.cells.isEmpty()) return
+        val first = minOf(selection.start, selection.end).coerceIn(snapshot.cells.indices)
+        val last = maxOf(selection.start, selection.end).coerceIn(snapshot.cells.indices)
+        drawTextSelectionHandle(canvas, selectionHandleGeometry(first, false, snapshot))
+        drawTextSelectionHandle(canvas, selectionHandleGeometry(last, true, snapshot))
+    }
+
+    private fun drawTextSelectionHandle(
+        canvas: Canvas,
+        geometry: TerminalSelectionHandleGeometry
+    ) {
+        selectionHandlePaint.strokeWidth = 2f * density
+        canvas.drawLine(
+            geometry.x,
+            geometry.anchorY,
+            geometry.x,
+            geometry.centerY,
+            selectionHandlePaint
+        )
+        canvas.drawCircle(
+            geometry.x,
+            geometry.centerY,
+            selectionHandleRadius,
+            selectionHandlePaint
+        )
     }
 
     private fun drawWideGlyph(canvas: Canvas, cell: TerminalCell, column: Int, baseline: Float) {
@@ -671,7 +724,8 @@ class TerminalView @JvmOverloads constructor(
             MotionEvent.ACTION_DOWN -> {
                 stopFling()
                 removeCallbacks(beginLongPressSelection)
-                if (textSelection != null && !selectingWithTouch) {
+                val touchedSelectionHandle = selectionHandleAt(event.x, event.y)
+                if (textSelection != null && touchedSelectionHandle == null) {
                     clearTextSelection()
                     lastTapTime = 0L
                 }
@@ -686,14 +740,42 @@ class TerminalView @JvmOverloads constructor(
                 scrollRemainder = 0f
                 scrolledWithFinger = false
                 movedBeyondTouchSlop = false
-                selectingWithTouch = false
-                postDelayed(beginLongPressSelection, ViewConfiguration.getLongPressTimeout().toLong())
+                selectionDraggedAfterLongPress = false
+                draggedSelectionHandle = touchedSelectionHandle
+                selectingWithTouch = touchedSelectionHandle != null
+                val handleGeometry = touchedSelectionHandle?.let { handle ->
+                    cachedSnapshot?.let { snapshot -> selectionHandleGeometry(handle, snapshot) }
+                }
+                if (handleGeometry != null) {
+                    selectionHandleDragOffsetX = handleGeometry.cellCenterX - event.x
+                    selectionHandleDragOffsetY = handleGeometry.cellCenterY - event.y
+                    lastTapTime = 0L
+                } else {
+                    selectionHandleDragOffsetX = 0f
+                    selectionHandleDragOffsetY = 0f
+                    postDelayed(beginLongPressSelection, ViewConfiguration.getLongPressTimeout().toLong())
+                }
                 parent?.requestDisallowInterceptTouchEvent(true)
             }
             MotionEvent.ACTION_MOVE -> {
                 velocityTracker?.addMovement(event)
                 if (selectingWithTouch) {
-                    updateTextSelection(event.x, event.y)
+                    val handle = draggedSelectionHandle
+                    if (handle == null) {
+                        if (
+                            selectionDraggedAfterLongPress ||
+                            abs(event.x - downX) > touchSlop || abs(event.y - downY) > touchSlop
+                        ) {
+                            selectionDraggedAfterLongPress = true
+                            updateTextSelection(event.x, event.y)
+                        }
+                    } else {
+                        updateSelectionHandle(
+                            handle,
+                            event.x + selectionHandleDragOffsetX,
+                            event.y + selectionHandleDragOffsetY
+                        )
+                    }
                     lastX = event.x
                     lastY = event.y
                     return true
@@ -721,8 +803,19 @@ class TerminalView @JvmOverloads constructor(
                 velocityTracker?.addMovement(event)
                 parent?.requestDisallowInterceptTouchEvent(false)
                 if (selectingWithTouch) {
-                    updateTextSelection(event.x, event.y)
+                    val handle = draggedSelectionHandle
+                    if (handle == null) {
+                        if (selectionDraggedAfterLongPress) updateTextSelection(event.x, event.y)
+                    } else {
+                        updateSelectionHandle(
+                            handle,
+                            event.x + selectionHandleDragOffsetX,
+                            event.y + selectionHandleDragOffsetY
+                        )
+                    }
                     selectingWithTouch = false
+                    selectionDraggedAfterLongPress = false
+                    draggedSelectionHandle = null
                 } else if (scrolledWithFinger) {
                     velocityTracker?.computeCurrentVelocity(1000, maximumFlingVelocity)
                     val fingerVelocityY = velocityTracker?.yVelocity ?: 0f
@@ -766,6 +859,8 @@ class TerminalView @JvmOverloads constructor(
                 parent?.requestDisallowInterceptTouchEvent(false)
                 recycleVelocityTracker()
                 selectingWithTouch = false
+                selectionDraggedAfterLongPress = false
+                draggedSelectionHandle = null
                 scrolledWithFinger = false
                 movedBeyondTouchSlop = false
                 scrollRemainder = 0f
@@ -802,6 +897,88 @@ class TerminalView @JvmOverloads constructor(
             current.copy(start = current.anchorStart, end = index)
         }
         invalidate()
+    }
+
+    private fun updateSelectionHandle(handle: TerminalSelectionHandle, x: Float, y: Float) {
+        val snapshot = cachedSnapshot?.takeIf { it.cells.isNotEmpty() } ?: return
+        val current = textSelection ?: return
+        var index = cellIndexAt(x, y, snapshot)
+        if (handle == TerminalSelectionHandle.START && snapshot.cells[index].width == 0 && index > 0) {
+            index--
+        }
+        when (handle) {
+            TerminalSelectionHandle.START -> {
+                if (index <= current.end) {
+                    textSelection = current.copy(start = index)
+                } else {
+                    textSelection = current.copy(start = current.end, end = index)
+                    draggedSelectionHandle = TerminalSelectionHandle.END
+                }
+            }
+            TerminalSelectionHandle.END -> {
+                if (index >= current.start) {
+                    textSelection = current.copy(end = index)
+                } else {
+                    textSelection = current.copy(start = index, end = current.start)
+                    draggedSelectionHandle = TerminalSelectionHandle.START
+                }
+            }
+        }
+        invalidate()
+    }
+
+    private fun selectionHandleAt(x: Float, y: Float): TerminalSelectionHandle? {
+        val snapshot = cachedSnapshot?.takeIf { it.cells.isNotEmpty() } ?: return null
+        val start = selectionHandleGeometry(TerminalSelectionHandle.START, snapshot) ?: return null
+        val end = selectionHandleGeometry(TerminalSelectionHandle.END, snapshot) ?: return null
+        val touchRadiusSquared = selectionHandleTouchRadius * selectionHandleTouchRadius
+        val startDistance = (x - start.x) * (x - start.x) +
+            (y - start.centerY) * (y - start.centerY)
+        val endDistance = (x - end.x) * (x - end.x) +
+            (y - end.centerY) * (y - end.centerY)
+        return when {
+            startDistance > touchRadiusSquared && endDistance > touchRadiusSquared -> null
+            startDistance <= endDistance -> TerminalSelectionHandle.START
+            else -> TerminalSelectionHandle.END
+        }
+    }
+
+    private fun selectionHandleGeometry(
+        handle: TerminalSelectionHandle,
+        snapshot: TerminalSnapshot
+    ): TerminalSelectionHandleGeometry? {
+        val selection = textSelection ?: return null
+        val index = when (handle) {
+            TerminalSelectionHandle.START -> minOf(selection.start, selection.end)
+            TerminalSelectionHandle.END -> maxOf(selection.start, selection.end)
+        }.coerceIn(snapshot.cells.indices)
+        return selectionHandleGeometry(index, handle == TerminalSelectionHandle.END, snapshot)
+    }
+
+    private fun selectionHandleGeometry(
+        index: Int,
+        isEnd: Boolean,
+        snapshot: TerminalSnapshot
+    ): TerminalSelectionHandleGeometry {
+        val safeIndex = index.coerceIn(snapshot.cells.indices)
+        val row = safeIndex / snapshot.columns
+        val column = safeIndex % snapshot.columns
+        val rowTop = verticalPadding + row * lineHeight
+        val rowBottom = rowTop + lineHeight
+        val drawBelow = rowBottom + selectionHandleStemLength + selectionHandleRadius * 2f <= height
+        val anchorY = if (drawBelow) rowBottom else rowTop
+        val centerY = if (drawBelow) {
+            anchorY + selectionHandleStemLength + selectionHandleRadius
+        } else {
+            anchorY - selectionHandleStemLength - selectionHandleRadius
+        }
+        return TerminalSelectionHandleGeometry(
+            x = horizontalPadding + (column + if (isEnd) 1 else 0) * characterWidth,
+            anchorY = anchorY,
+            centerY = centerY,
+            cellCenterX = horizontalPadding + (column + 0.5f) * characterWidth,
+            cellCenterY = rowTop + lineHeight / 2f
+        )
     }
 
     private fun cellIndexAt(x: Float, y: Float, snapshot: TerminalSnapshot): Int {
@@ -867,6 +1044,9 @@ class TerminalView @JvmOverloads constructor(
 
     private fun clearTextSelection(finishActionMode: Boolean = true) {
         textSelection = null
+        selectingWithTouch = false
+        selectionDraggedAfterLongPress = false
+        draggedSelectionHandle = null
         invalidate()
         if (finishActionMode) {
             val mode = selectionActionMode
