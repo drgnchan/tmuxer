@@ -19,6 +19,7 @@ import com.tmuxer.app.ssh.PiNotInstalledException
 import com.tmuxer.app.ssh.RemoteDirectoryListing
 import com.tmuxer.app.ssh.SshManager
 import com.tmuxer.app.ssh.TmuxNotInstalledException
+import com.tmuxer.app.terminal.TERMINAL_IMAGE_LINK_CELL_SIZE_RESPONSE
 import com.tmuxer.app.terminal.TerminalEmulator
 import com.tmuxer.app.terminal.TerminalTheme
 import kotlinx.coroutines.CancellationException
@@ -498,7 +499,14 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                         }
                     }
                 )
-                if (generation == terminalGeneration) _terminalConnected.value = true
+                if (generation == terminalGeneration) {
+                    if (captureImages) {
+                        // Pi queries pixel cell dimensions only at startup. Also send the compact
+                        // link geometry proactively so already-running workspaces reflow images.
+                        sshManager.writeTerminal(TERMINAL_IMAGE_LINK_CELL_SIZE_RESPONSE.toByteArray())
+                    }
+                    _terminalConnected.value = true
+                }
             } catch (error: Throwable) {
                 if (generation == terminalGeneration) {
                     activeTerminalWindowId = null

@@ -11,6 +11,7 @@ const val TERMINAL_DEFAULT_FOREGROUND: Int = 0xFFE3ECE7.toInt()
 const val TERMINAL_DEFAULT_BACKGROUND: Int = 0xFF07100D.toInt()
 const val TERMINAL_LIGHT_FOREGROUND: Int = 0xFF20252A.toInt()
 const val TERMINAL_LIGHT_BACKGROUND: Int = 0xFFF7F8F5.toInt()
+internal const val TERMINAL_IMAGE_LINK_CELL_SIZE_RESPONSE = "\u001B[6;100;1t"
 private val EMPTY_BYTE_ARRAY = ByteArray(0)
 
 enum class TerminalTheme(
@@ -599,6 +600,11 @@ class TerminalEmulator(
             'n' -> when (parameters.firstOrNull()) {
                 5 -> reply("\u001B[0n")
                 6 -> reply("\u001B[${cursorRow + 1};${cursorColumn + 1}R")
+            }
+            't' -> if (parameters.firstOrNull() == 16) {
+                // tmuxer renders images as one-row links. Reporting a deliberately tall cell makes
+                // Pi reserve one row for Kitty output instead of its normal 20-30 image rows.
+                reply(TERMINAL_IMAGE_LINK_CELL_SIZE_RESPONSE)
             }
             // Do not answer DA here. tmux can emit a late DA probe after attaching; on a few
             // servers that reply is forwarded to the pane and appears as literal "?1;2c" input.

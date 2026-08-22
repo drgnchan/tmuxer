@@ -22,6 +22,16 @@ class TerminalEmulatorTest {
     }
 
     @Test
+    fun reportsOneRowImageLinkGeometryToPi() {
+        val replies = mutableListOf<String>()
+        val terminal = TerminalEmulator(20, 5, reply = replies::add)
+
+        terminal.feed("\u001B[16t".toByteArray())
+
+        assertEquals(listOf(TERMINAL_IMAGE_LINK_CELL_SIZE_RESPONSE), replies)
+    }
+
+    @Test
     fun decodesUtf8SplitAcrossNetworkPackets() {
         val terminal = TerminalEmulator(20, 5)
         val bytes = "你".toByteArray(Charsets.UTF_8)
