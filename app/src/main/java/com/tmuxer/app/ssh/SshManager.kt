@@ -3,6 +3,7 @@ package com.tmuxer.app.ssh
 import android.content.Context
 import android.net.Uri
 import android.util.Base64
+import android.util.Log
 import com.jcraft.jsch.ChannelExec
 import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.HostKey
@@ -11,6 +12,7 @@ import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
 import com.jcraft.jsch.SftpProgressMonitor
 import com.jcraft.jsch.UserInfo
+import com.tmuxer.app.BuildConfig
 import com.tmuxer.app.data.AuthType
 import com.tmuxer.app.data.ConnectionInfo
 import com.tmuxer.app.data.SshProfile
@@ -42,10 +44,51 @@ data class UploadedRemoteFile(
     val size: Long
 )
 
+data class RemoteDirectoryListing(
+    val currentPath: String,
+    val parentPath: String?,
+    val directories: List<String>
+)
+
+internal data class ImageStreamCheckpoint(
+    val windowId: String,
+    val streamIdentity: String,
+    val byteOffset: Long
+)
+
+internal data class ImageReplayPlan(
+    val firstByte: Long,
+    val replayBytes: Long,
+    val resumed: Boolean
+)
+
+internal fun planImageReplay(
+    windowId: String,
+    streamIdentity: String,
+    streamSize: Long,
+    checkpoint: ImageStreamCheckpoint?
+): ImageReplayPlan {
+    val safeSize = streamSize.coerceAtLeast(0)
+    val canResume = checkpoint != null &&
+        checkpoint.windowId == windowId &&
+        checkpoint.streamIdentity == streamIdentity &&
+        checkpoint.byteOffset in 0..safeSize
+    val replayBytes = if (canResume) {
+        safeSize - checkpoint.byteOffset
+    } else {
+        minOf(safeSize, MAX_IMAGE_STREAM_REPLAY_BYTES.toLong())
+    }
+    return ImageReplayPlan(
+        firstByte = safeSize - replayBytes + 1,
+        replayBytes = replayBytes,
+        resumed = canResume
+    )
+}
+
 // tmux sanitizes tab/control characters in format output to underscores. A long printable
 // separator is stable across tmux versions and exceedingly unlikely in user-defined names.
 internal const val TMUX_FIELD_SEPARATOR = "__TMUXER_FIELD_7F3A__"
-private const val MAX_IMAGE_STREAM_REPLAY_BYTES = 32 * 1024 * 1024
+internal const val MAX_IMAGE_STREAM_REPLAY_BYTES = 32 * 1024 * 1024
 private const val KITTY_FILTER_BASE64 =
     "Y29uc3QgZnMgPSByZXF1aXJlKCdub2RlOmZzJyk7CmNvbnN0IG91dHB1dCA9IGZzLmNyZWF0ZVdyaXRlU3RyZWFtKHByb2Nlc3MuYXJndlsyXSwgeyBmbGFnczogJ2EnLCBtb2RlOiAwbzYwMCB9KTsKbGV0IHN0YXRlID0gMDsKcHJvY2Vzcy5zdGRpbi5vbignZGF0YScsIChjaHVuaykgPT4gewogIG91dHB1dC53cml0ZShjaHVuayk7CiAgY29uc3QgY2xlYW4gPSBCdWZmZXIuYWxsb2NVbnNhZmUoY2h1bmsubGVuZ3RoKTsKICBsZXQgbGVuZ3RoID0gMDsKICBmb3IgKGNvbnN0IGJ5dGUgb2YgY2h1bmspIHsKICAgIGlmIChzdGF0ZSA9PT0gMCkgewogICAgICBpZiAoYnl0ZSA9PT0gMHgxYikgc3RhdGUgPSAxOwogICAgICBlbHNlIGNsZWFuW2xlbmd0aCsrXSA9IGJ5dGU7CiAgICB9IGVsc2UgaWYgKHN0YXRlID09PSAxKSB7CiAgICAgIGlmIChieXRlID09PSAweDVmKSBzdGF0ZSA9IDI7CiAgICAgIGVsc2UgewogICAgICAgIGNsZWFuW2xlbmd0aCsrXSA9IDB4MWI7CiAgICAgICAgaWYgKGJ5dGUgPT09IDB4MWIpIHN0YXRlID0gMTsKICAgICAgICBlbHNlIHsgY2xlYW5bbGVuZ3RoKytdID0gYnl0ZTsgc3RhdGUgPSAwOyB9CiAgICAgIH0KICAgIH0gZWxzZSBpZiAoc3RhdGUgPT09IDIpIHsKICAgICAgaWYgKGJ5dGUgPT09IDB4MWIpIHN0YXRlID0gMzsKICAgIH0gZWxzZSBpZiAoYnl0ZSA9PT0gMHg1YykgewogICAgICBzdGF0ZSA9IDA7CiAgICB9IGVsc2UgaWYgKGJ5dGUgIT09IDB4MWIpIHsKICAgICAgc3RhdGUgPSAyOwogICAgfQogIH0KICBpZiAobGVuZ3RoID4gMCkgcHJvY2Vzcy5zdGRvdXQud3JpdGUoY2xlYW4uc3ViYXJyYXkoMCwgbGVuZ3RoKSk7Cn0pOwpwcm9jZXNzLnN0ZGluLm9uKCdlbmQnLCAoKSA9PiBvdXRwdXQuZW5kKCkpOwo="
 private const val PYTHON_PTY_PROXY_BASE64 =
@@ -163,7 +206,11 @@ class SshManager(context: Context) {
 
     fun isTerminalConnected(): Boolean = terminalChannel?.isConnected == true
 
-    suspend fun createSession(name: String, launchPi: Boolean = false) = withContext(Dispatchers.IO) {
+    suspend fun createSession(
+        name: String,
+        launchPi: Boolean = false,
+        workingDirectory: String = ""
+    ) = withContext(Dispatchers.IO) {
         val safeName = name.trim()
         require(safeName.isNotEmpty()) { "会话名不能为空" }
         val piCheck = if (launchPi) {
@@ -174,7 +221,19 @@ class SshManager(context: Context) {
         } else {
             ""
         }
-        val createCommand = "tmux new-session -d -s ${shellQuote(safeName)}"
+        val requestedDirectory = workingDirectory.trim()
+        val directorySetup = if (launchPi && requestedDirectory.isNotEmpty()) {
+            "START_DIR=${shellQuote(requestedDirectory)}; " +
+                "if [ \"\$START_DIR\" = '~' ]; then START_DIR=\"\$HOME\"; " +
+                "elif [ \"\${START_DIR#\\~/}\" != \"\$START_DIR\" ]; " +
+                "then START_DIR=\"\$HOME/\${START_DIR#\\~/}\"; fi; " +
+                "if [ ! -d \"\$START_DIR\" ]; then " +
+                "printf '__TMUXER_DIRECTORY_MISSING__\\n'; exit 2; fi; "
+        } else {
+            ""
+        }
+        val createCommand = "tmux new-session -d -s ${shellQuote(safeName)}" +
+            if (directorySetup.isNotEmpty()) " -c \"\$START_DIR\"" else ""
         val piLaunchCommand = if (launchPi) {
             val target = shellQuote("$safeName:0")
             // Pi normally disables images under tmux. Hide only the multiplexer environment from
@@ -224,9 +283,12 @@ class SshManager(context: Context) {
         } else {
             ""
         }
-        val result = execute(piCheck + createCommand + piLaunchCommand)
+        val result = execute(piCheck + directorySetup + createCommand + piLaunchCommand)
         if (result.output.lineSequence().any { it.trim() == "__TMUXER_PI_MISSING__" }) {
             throw PiNotInstalledException()
+        }
+        if (result.output.lineSequence().any { it.trim() == "__TMUXER_DIRECTORY_MISSING__" }) {
+            throw IllegalArgumentException("工作目录不存在或无权访问：$requestedDirectory")
         }
         if (result.exitCode != 0) {
             throw IllegalStateException(result.error.ifBlank { result.output }.trim())
@@ -246,6 +308,37 @@ class SshManager(context: Context) {
         val result = execute("tmux kill-session -t ${shellQuote(sessionId)}")
         if (result.exitCode != 0) {
             throw IllegalStateException(result.error.ifBlank { "退出 tmux 会话失败" }.trim())
+        }
+    }
+
+    suspend fun listRemoteDirectories(path: String): RemoteDirectoryListing = withContext(Dispatchers.IO) {
+        val activeSession = requireSession()
+        val channel = activeSession.openChannel("sftp") as ChannelSftp
+        try {
+            channel.connect(12_000)
+            val home = channel.home.trimEnd('/').ifEmpty { "/" }
+            val requested = path.trim().ifEmpty { "~" }
+            val resolved = when {
+                requested == "~" -> home
+                requested.startsWith("~/") -> "$home/${requested.removePrefix("~/")}".replace("//", "/")
+                else -> requested
+            }
+            channel.cd(resolved)
+            val current = channel.pwd().trimEnd('/').ifEmpty { "/" }
+            val parent = current.takeUnless { it == "/" }
+                ?.substringBeforeLast('/', "")
+                ?.ifEmpty { "/" }
+            val directories = channel.ls(".")
+                .asSequence()
+                .filter { entry -> entry.attrs.isDir && entry.filename != "." && entry.filename != ".." }
+                .map { entry ->
+                    if (current == "/") "/${entry.filename}" else "$current/${entry.filename}"
+                }
+                .sortedWith(compareBy(String.CASE_INSENSITIVE_ORDER) { it.substringAfterLast('/') })
+                .toList()
+            RemoteDirectoryListing(current, parent, directories)
+        } finally {
+            runCatching { channel.disconnect() }
         }
     }
 
@@ -315,14 +408,18 @@ class SshManager(context: Context) {
         }
     }
 
-    suspend fun openTerminal(
+    internal suspend fun openTerminal(
         sessionId: String,
         windowId: String,
         columns: Int,
         rows: Int,
         captureImages: Boolean,
+        imageCheckpoint: ImageStreamCheckpoint?,
         onBytes: (ByteArray, Int) -> Unit,
         onImageBytes: (ByteArray, Int) -> Unit,
+        onImageReplayStart: (Boolean) -> Unit,
+        onImageCheckpoint: (ImageStreamCheckpoint) -> Unit,
+        onImageReplayComplete: () -> Unit,
         onClosed: (Int) -> Unit
     ) = withContext(Dispatchers.IO) {
         require(sessionId.matches(Regex("\\$[0-9]+"))) { "无效的 tmux 会话" }
@@ -333,7 +430,20 @@ class SshManager(context: Context) {
             // Pi intentionally disables inline graphics when it detects tmux. App-created Pi panes
             // mirror their raw output to a private stream, allowing Kitty images to be decoded
             // without weakening tmux's normal escape-sequence filtering.
-            runCatching { openImageStream(windowId, onImageBytes) }
+            val imageStreamOpened = runCatching {
+                openImageStream(
+                    windowId = windowId,
+                    checkpoint = imageCheckpoint,
+                    onImageBytes = onImageBytes,
+                    onReplayStart = onImageReplayStart,
+                    onCheckpoint = onImageCheckpoint,
+                    onReplayComplete = onImageReplayComplete
+                )
+            }.getOrDefault(false)
+            if (!imageStreamOpened) {
+                onImageReplayStart(false)
+                onImageReplayComplete()
+            }
         }
 
         val activeSession = requireSession()
@@ -386,17 +496,45 @@ class SshManager(context: Context) {
 
     private fun openImageStream(
         windowId: String,
-        onImageBytes: (ByteArray, Int) -> Unit
-    ) {
+        checkpoint: ImageStreamCheckpoint?,
+        onImageBytes: (ByteArray, Int) -> Unit,
+        onReplayStart: (Boolean) -> Unit,
+        onCheckpoint: (ImageStreamCheckpoint) -> Unit,
+        onReplayComplete: () -> Unit
+    ): Boolean {
         val option = execute(
             "tmux show-options -wv -t ${shellQuote(windowId)} @tmuxer_image_stream 2>/dev/null",
             timeoutMillis = 5_000
         )
         val path = option.output.lineSequence().firstOrNull()?.trim().orEmpty()
-        if (option.exitCode != 0 || path.isEmpty()) return
+        if (option.exitCode != 0 || path.isEmpty()) return false
+
+        // Device/inode prevents a checkpoint from being reused if a tmux server restart creates a
+        // different stream at the same path. Older/minimal systems without GNU stat fall back to
+        // the path and still reject checkpoints whose offsets are beyond a truncated file.
+        val statResult = execute("stat -Lc '%d:%i:%s' -- ${shellQuote(path)}", timeoutMillis = 5_000)
+        val statParts = statResult.output.lineSequence().firstOrNull()?.trim()?.split(':', limit = 3)
+        val streamSize: Long
+        val streamIdentity: String
+        if (statResult.exitCode == 0 && statParts?.size == 3 && statParts[2].toLongOrNull() != null) {
+            streamSize = statParts[2].toLong().coerceAtLeast(0)
+            streamIdentity = "$path:${statParts[0]}:${statParts[1]}"
+        } else {
+            val sizeResult = execute("wc -c < ${shellQuote(path)}", timeoutMillis = 5_000)
+            streamSize = sizeResult.output.trim().toLongOrNull()?.coerceAtLeast(0) ?: return false
+            streamIdentity = path
+        }
+        val plan = planImageReplay(windowId, streamIdentity, streamSize, checkpoint)
+        if (BuildConfig.DEBUG) {
+            Log.d(
+                "TmuxerPerf",
+                "image-replay window=$windowId resumed=${plan.resumed} " +
+                    "bytes=${plan.replayBytes} streamSize=$streamSize"
+            )
+        }
 
         val channel = requireSession().openChannel("exec") as ChannelExec
-        channel.setCommand("tail -c $MAX_IMAGE_STREAM_REPLAY_BYTES -F -- ${shellQuote(path)}")
+        channel.setCommand("tail -c +${plan.firstByte} -F -- ${shellQuote(path)}")
         channel.setInputStream(null)
         channel.setErrStream(ByteArrayOutputStream())
         val input = channel.inputStream
@@ -408,17 +546,52 @@ class SshManager(context: Context) {
         }
         imageChannel = channel
         imageInput = input
+        onReplayStart(plan.resumed)
         imageReader = ioScope.launch {
             val buffer = ByteArray(16 * 1024)
+            var replayRemaining = plan.replayBytes
+            var streamOffset = plan.firstByte - 1
+            var replayCompleted = false
+
+            fun publishCheckpoint() {
+                onCheckpoint(ImageStreamCheckpoint(windowId, streamIdentity, streamOffset))
+            }
+
+            fun finishReplay() {
+                if (replayCompleted) return
+                replayCompleted = true
+                onReplayComplete()
+            }
+
+            publishCheckpoint()
+            if (replayRemaining == 0L) finishReplay()
             try {
                 while (isActive && channel.isConnected) {
                     val count = input.read(buffer)
                     if (count < 0) break
-                    if (count > 0) onImageBytes(buffer, count)
+                    if (count <= 0) continue
+
+                    val replayCount = minOf(replayRemaining, count.toLong()).toInt()
+                    if (replayCount > 0) {
+                        onImageBytes(buffer, replayCount)
+                        replayRemaining -= replayCount
+                        if (replayRemaining == 0L) finishReplay()
+                    }
+                    if (replayCount < count) {
+                        if (replayCount == 0) {
+                            onImageBytes(buffer, count)
+                        } else {
+                            val liveBytes = buffer.copyOfRange(replayCount, count)
+                            onImageBytes(liveBytes, liveBytes.size)
+                        }
+                    }
+                    streamOffset += count
+                    publishCheckpoint()
                 }
             } catch (_: Throwable) {
                 // Closing or replacing a terminal also interrupts its image stream.
             } finally {
+                if (!replayCompleted && imageChannel === channel) finishReplay()
                 if (imageChannel === channel) {
                     imageChannel = null
                     imageInput = null
@@ -426,6 +599,7 @@ class SshManager(context: Context) {
                 }
             }
         }
+        return true
     }
 
     fun writeTerminal(bytes: ByteArray) {

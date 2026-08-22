@@ -1,5 +1,7 @@
 package com.tmuxer.app.terminal
 
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -14,7 +16,10 @@ import android.text.InputType
 import android.util.AttributeSet
 import android.util.Log
 import android.util.LruCache
+import android.view.ActionMode
 import android.view.KeyEvent
+import android.view.Menu
+import android.view.MenuItem
 import android.view.MotionEvent
 import android.view.VelocityTracker
 import android.view.View
@@ -24,6 +29,7 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.OverScroller
+import android.widget.Toast
 import androidx.core.content.res.ResourcesCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -54,6 +60,33 @@ private data class DecodedTerminalImage(
     val sourceHeight: Int
 )
 private data class TerminalImageHitTarget(val bounds: RectF, val preview: TerminalImagePreview)
+private data class TerminalTextSelection(
+    val start: Int,
+    val end: Int,
+    val anchorStart: Int,
+    val anchorEnd: Int
+)
+
+internal fun terminalSelectionText(snapshot: TerminalSnapshot, selectionStart: Int, selectionEnd: Int): String {
+    if (snapshot.cells.isEmpty()) return ""
+    val first = minOf(selectionStart, selectionEnd).coerceIn(snapshot.cells.indices)
+    val last = maxOf(selectionStart, selectionEnd).coerceIn(snapshot.cells.indices)
+    val firstRow = first / snapshot.columns
+    val lastRow = last / snapshot.columns
+    val result = StringBuilder()
+    for (row in firstRow..lastRow) {
+        val startColumn = if (row == firstRow) first % snapshot.columns else 0
+        val endColumn = if (row == lastRow) last % snapshot.columns else snapshot.columns - 1
+        val line = StringBuilder()
+        for (column in startColumn..endColumn) {
+            val cell = snapshot.cells[row * snapshot.columns + column]
+            if (cell.width != 0) line.append(cell.text)
+        }
+        result.append(line.toString().trimEnd())
+        if (row != lastRow) result.append('\n')
+    }
+    return result.toString().trimEnd('\n')
+}
 
 class TerminalView @JvmOverloads constructor(
     context: Context,
@@ -85,6 +118,10 @@ class TerminalView @JvmOverloads constructor(
         style = Paint.Style.STROKE
         strokeWidth = density
     }
+    private val selectionPaint = Paint().apply {
+        color = 0x6665DDA5
+        style = Paint.Style.FILL
+    }
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private val imageBitmapCache = object : LruCache<TerminalImageCacheKey, DecodedTerminalImage>(32 * 1024) {
         override fun sizeOf(key: TerminalImageCacheKey, value: DecodedTerminalImage): Int =
@@ -113,6 +150,7 @@ class TerminalView @JvmOverloads constructor(
     private val lineHeight = textPaint.fontSpacing
     private val viewConfiguration = ViewConfiguration.get(context)
     private val touchSlop = viewConfiguration.scaledTouchSlop.toFloat()
+    private val doubleTapSlop = viewConfiguration.scaledDoubleTapSlop.toFloat()
     private val minimumFlingVelocity = viewConfiguration.scaledMinimumFlingVelocity.toFloat()
     private val maximumFlingVelocity = viewConfiguration.scaledMaximumFlingVelocity.toFloat()
     private val flingScroller = OverScroller(context)
@@ -135,12 +173,25 @@ class TerminalView @JvmOverloads constructor(
     private var dragRows = 0
     private var flingStartedAt = 0L
     private var flingRows = 0
+    private var lastTapTime = 0L
+    private var lastTapX = 0f
+    private var lastTapY = 0f
+    private var keyboardTapSuppressedUntil = 0L
+    private var selectingWithTouch = false
+    private var textSelection: TerminalTextSelection? = null
+    private var selectionActionMode: ActionMode? = null
     private var renderSamples = 0
     private var renderTotalNanos = 0L
     private var renderMaxNanos = 0L
 
     private val applyPendingResize = Runnable {
         applyTerminalSize(pendingColumns, pendingRows)
+    }
+
+    private val beginLongPressSelection = Runnable {
+        if (!movedBeyondTouchSlop && !scrolledWithFinger) {
+            selectingWithTouch = performLongClick()
+        }
     }
 
     private val flingStep = object : Runnable {
@@ -161,6 +212,12 @@ class TerminalView @JvmOverloads constructor(
         }
     }
 
+    private val emulatorChangedCallback: () -> Unit = {
+        snapshotDirty = true
+        renderDirty = true
+        postInvalidateOnAnimation()
+    }
+
     var terminalTheme: TerminalTheme = TerminalTheme.DARK
         set(value) {
             if (field == value) return
@@ -176,11 +233,8 @@ class TerminalView @JvmOverloads constructor(
             if (field === value) return
             field?.onChanged = null
             field = value
-            value?.onChanged = {
-                snapshotDirty = true
-                renderDirty = true
-                postInvalidateOnAnimation()
-            }
+            value?.onChanged = emulatorChangedCallback
+            clearTextSelection()
             cachedSnapshot = null
             imageHitTargets.clear()
             imageBitmapCache.evictAll()
@@ -202,8 +256,8 @@ class TerminalView @JvmOverloads constructor(
         isFocusable = true
         isFocusableInTouchMode = true
         setBackgroundColor(terminalTheme.backgroundColor)
-        contentDescription = "SSH 终端，点按打开键盘"
-        setOnLongClickListener { pasteClipboard() }
+        contentDescription = "SSH 终端，双击打开键盘，长按选择文本"
+        setOnLongClickListener { beginTextSelection(downX, downY) }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -231,6 +285,7 @@ class TerminalView @JvmOverloads constructor(
             if (renderStarted != 0L) recordRenderSample(SystemClock.elapsedRealtimeNanos() - renderStarted)
         }
         canvas.drawBitmap(bitmap, 0f, 0f, bitmapPaint)
+        drawTextSelection(canvas, snapshot)
     }
 
     private fun drawSnapshot(canvas: Canvas, snapshot: TerminalSnapshot) {
@@ -328,6 +383,28 @@ class TerminalView @JvmOverloads constructor(
             val left = horizontalPadding + snapshot.cursorColumn * characterWidth
             val top = verticalPadding + snapshot.cursorRow * lineHeight
             canvas.drawRect(left, top, left + characterWidth, top + lineHeight, cursorPaint)
+        }
+    }
+
+    private fun drawTextSelection(canvas: Canvas, snapshot: TerminalSnapshot) {
+        val selection = textSelection ?: return
+        if (snapshot.cells.isEmpty()) return
+        val first = minOf(selection.start, selection.end).coerceIn(snapshot.cells.indices)
+        val last = maxOf(selection.start, selection.end).coerceIn(snapshot.cells.indices)
+        val firstRow = first / snapshot.columns
+        val lastRow = last / snapshot.columns
+        for (row in firstRow..lastRow) {
+            val startColumn = if (row == firstRow) first % snapshot.columns else 0
+            val endColumn = if (row == lastRow) last % snapshot.columns else snapshot.columns - 1
+            val left = horizontalPadding + startColumn * characterWidth
+            val top = verticalPadding + row * lineHeight
+            canvas.drawRect(
+                left,
+                top,
+                horizontalPadding + (endColumn + 1) * characterWidth,
+                top + lineHeight,
+                selectionPaint
+            )
         }
     }
 
@@ -536,6 +613,11 @@ class TerminalView @JvmOverloads constructor(
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 stopFling()
+                removeCallbacks(beginLongPressSelection)
+                if (textSelection != null && !selectingWithTouch) {
+                    clearTextSelection()
+                    lastTapTime = 0L
+                }
                 velocityTracker?.recycle()
                 velocityTracker = VelocityTracker.obtain().also { it.addMovement(event) }
                 downX = event.x
@@ -547,14 +629,23 @@ class TerminalView @JvmOverloads constructor(
                 scrollRemainder = 0f
                 scrolledWithFinger = false
                 movedBeyondTouchSlop = false
+                selectingWithTouch = false
+                postDelayed(beginLongPressSelection, ViewConfiguration.getLongPressTimeout().toLong())
                 parent?.requestDisallowInterceptTouchEvent(true)
             }
             MotionEvent.ACTION_MOVE -> {
                 velocityTracker?.addMovement(event)
+                if (selectingWithTouch) {
+                    updateTextSelection(event.x, event.y)
+                    lastX = event.x
+                    lastY = event.y
+                    return true
+                }
                 val totalX = event.x - downX
                 val totalY = event.y - downY
                 if (abs(totalX) > touchSlop || abs(totalY) > touchSlop) {
                     movedBeyondTouchSlop = true
+                    removeCallbacks(beginLongPressSelection)
                 }
                 val startedScrolling = !scrolledWithFinger &&
                     abs(totalY) > touchSlop && abs(totalY) >= abs(totalX)
@@ -569,9 +660,13 @@ class TerminalView @JvmOverloads constructor(
                 lastY = event.y
             }
             MotionEvent.ACTION_UP -> {
+                removeCallbacks(beginLongPressSelection)
                 velocityTracker?.addMovement(event)
                 parent?.requestDisallowInterceptTouchEvent(false)
-                if (scrolledWithFinger) {
+                if (selectingWithTouch) {
+                    updateTextSelection(event.x, event.y)
+                    selectingWithTouch = false
+                } else if (scrolledWithFinger) {
                     velocityTracker?.computeCurrentVelocity(1000, maximumFlingVelocity)
                     val fingerVelocityY = velocityTracker?.yVelocity ?: 0f
                     perfLog(
@@ -584,25 +679,143 @@ class TerminalView @JvmOverloads constructor(
                         scrollRemainder = 0f
                     }
                 } else if (!movedBeyondTouchSlop) {
-                    performClick()
                     val image = imageHitTargets.lastOrNull { it.bounds.contains(event.x, event.y) }
                     if (image != null) {
+                        suppressKeyboardDoubleTap()
                         onImageClick(image.preview)
+                    } else if (event.eventTime < keyboardTapSuppressedUntil) {
+                        lastTapTime = 0L
                     } else {
-                        showKeyboard()
+                        val elapsed = event.eventTime - lastTapTime
+                        val deltaX = event.x - lastTapX
+                        val deltaY = event.y - lastTapY
+                        val isDoubleTap = lastTapTime != 0L &&
+                            elapsed <= ViewConfiguration.getDoubleTapTimeout() &&
+                            deltaX * deltaX + deltaY * deltaY <= doubleTapSlop * doubleTapSlop
+                        if (isDoubleTap) {
+                            lastTapTime = 0L
+                            performClick()
+                        } else {
+                            lastTapTime = event.eventTime
+                            lastTapX = event.x
+                            lastTapY = event.y
+                        }
                     }
                 }
                 recycleVelocityTracker()
             }
             MotionEvent.ACTION_CANCEL -> {
+                removeCallbacks(beginLongPressSelection)
                 parent?.requestDisallowInterceptTouchEvent(false)
                 recycleVelocityTracker()
+                selectingWithTouch = false
                 scrolledWithFinger = false
                 movedBeyondTouchSlop = false
                 scrollRemainder = 0f
             }
         }
         return true
+    }
+
+    private fun beginTextSelection(x: Float, y: Float): Boolean {
+        val snapshot = cachedSnapshot ?: return false
+        var index = cellIndexAt(x, y, snapshot)
+        if (snapshot.cells[index].width == 0 && index > 0) index--
+        if (!isWordCell(snapshot.cells[index])) return false
+        val rowStart = index / snapshot.columns * snapshot.columns
+        val rowEnd = rowStart + snapshot.columns - 1
+        var wordStart = index
+        var wordEnd = index
+        while (wordStart > rowStart && isWordCell(snapshot.cells[wordStart - 1])) wordStart--
+        while (wordEnd < rowEnd && isWordCell(snapshot.cells[wordEnd + 1])) wordEnd++
+        textSelection = TerminalTextSelection(wordStart, wordEnd, wordStart, wordEnd)
+        invalidate()
+        showSelectionActionMode()
+        return true
+    }
+
+    private fun updateTextSelection(x: Float, y: Float) {
+        val snapshot = cachedSnapshot ?: return
+        val current = textSelection ?: return
+        var index = cellIndexAt(x, y, snapshot)
+        if (snapshot.cells[index].width == 0 && index > 0) index--
+        textSelection = if (index < current.anchorStart) {
+            current.copy(start = index, end = current.anchorEnd)
+        } else {
+            current.copy(start = current.anchorStart, end = index)
+        }
+        invalidate()
+    }
+
+    private fun cellIndexAt(x: Float, y: Float, snapshot: TerminalSnapshot): Int {
+        val column = floor((x - horizontalPadding) / characterWidth).toInt()
+            .coerceIn(0, snapshot.columns - 1)
+        val row = floor((y - verticalPadding) / lineHeight).toInt()
+            .coerceIn(0, snapshot.rows - 1)
+        return row * snapshot.columns + column
+    }
+
+    private fun isWordCell(cell: TerminalCell): Boolean =
+        cell.width == 0 || cell.text.any { !it.isWhitespace() }
+
+    private fun showSelectionActionMode() {
+        selectionActionMode?.finish()
+        selectionActionMode = startActionMode(object : ActionMode.Callback {
+            override fun onCreateActionMode(mode: ActionMode, menu: Menu): Boolean {
+                menu.add(0, 1, 0, "复制").setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
+                menu.add(0, 2, 1, "全选")
+                return true
+            }
+
+            override fun onPrepareActionMode(mode: ActionMode, menu: Menu): Boolean = false
+
+            override fun onActionItemClicked(mode: ActionMode, item: MenuItem): Boolean = when (item.itemId) {
+                1 -> {
+                    copySelectedText()
+                    mode.finish()
+                    true
+                }
+                2 -> {
+                    selectAllVisibleText()
+                    true
+                }
+                else -> false
+            }
+
+            override fun onDestroyActionMode(mode: ActionMode) {
+                if (selectionActionMode === mode) selectionActionMode = null
+                textSelection = null
+                invalidate()
+            }
+        }, ActionMode.TYPE_FLOATING)
+    }
+
+    private fun selectAllVisibleText() {
+        val snapshot = cachedSnapshot ?: return
+        val first = snapshot.cells.indexOfFirst(::isWordCell).takeIf { it >= 0 } ?: return
+        val last = snapshot.cells.indexOfLast(::isWordCell).takeIf { it >= first } ?: return
+        textSelection = TerminalTextSelection(first, last, first, last)
+        invalidate()
+    }
+
+    private fun copySelectedText() {
+        val snapshot = cachedSnapshot ?: return
+        val selection = textSelection ?: return
+        val text = terminalSelectionText(snapshot, selection.start, selection.end)
+        if (text.isEmpty()) return
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+        clipboard.setPrimaryClip(ClipData.newPlainText("终端文本", text))
+        Toast.makeText(context, "已复制终端文本", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun clearTextSelection(finishActionMode: Boolean = true) {
+        textSelection = null
+        invalidate()
+        if (finishActionMode) {
+            val mode = selectionActionMode
+            selectionActionMode = null
+            mode?.finish()
+        }
     }
 
     private fun dispatchScrollDistance(distanceY: Float, x: Float, y: Float, eventTime: Long) {
@@ -714,19 +927,32 @@ class TerminalView @JvmOverloads constructor(
 
     override fun onDetachedFromWindow() {
         stopFling()
+        if (emulator?.onChanged === emulatorChangedCallback) emulator?.onChanged = null
         removeCallbacks(applyPendingResize)
+        removeCallbacks(beginLongPressSelection)
+        clearTextSelection()
         recycleVelocityTracker()
         imageDecodeExecutor.shutdownNow()
         super.onDetachedFromWindow()
     }
 
     fun pasteClipboard(): Boolean {
-        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as android.content.ClipboardManager
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
         if (text.isNullOrEmpty()) return false
         onInput(text)
         performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
         return true
+    }
+
+    /**
+     * Keeps a tap used to open or dismiss an overlay from becoming one half of the terminal's
+     * keyboard double-tap gesture. Dialog dismissal can return its final touch event to this view.
+     */
+    internal fun suppressKeyboardDoubleTap() {
+        lastTapTime = 0L
+        keyboardTapSuppressedUntil = SystemClock.uptimeMillis() +
+            ViewConfiguration.getDoubleTapTimeout()
     }
 
     fun toggleKeyboard() {
@@ -750,6 +976,7 @@ class TerminalView @JvmOverloads constructor(
 
     override fun performClick(): Boolean {
         super.performClick()
+        showKeyboard()
         return true
     }
 

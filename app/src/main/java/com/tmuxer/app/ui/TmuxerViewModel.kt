@@ -13,8 +13,10 @@ import com.tmuxer.app.data.SecureProfileStore
 import com.tmuxer.app.data.SshProfile
 import com.tmuxer.app.data.TmuxWindow
 import com.tmuxer.app.data.resolveRestoredWindow
+import com.tmuxer.app.ssh.ImageStreamCheckpoint
 import com.tmuxer.app.ssh.NoActiveConnectionException
 import com.tmuxer.app.ssh.PiNotInstalledException
+import com.tmuxer.app.ssh.RemoteDirectoryListing
 import com.tmuxer.app.ssh.SshManager
 import com.tmuxer.app.ssh.TmuxNotInstalledException
 import com.tmuxer.app.terminal.TerminalEmulator
@@ -93,14 +95,20 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     // private raw-output stream; this shadow emulator follows its cursor and forwards only Kitty
     // image operations into the visible terminal.
     private val imageTerminal = TerminalEmulator(
-        kittyGraphicsSink = terminal::applyKittyGraphicsCommand
+        kittyGraphicsSink = terminal::applyKittyGraphicsCommand,
+        retainScreenContent = false
     )
 
     private var refreshJob: Job? = null
     private var connectJob: Job? = null
     private var recoveryJob: Job? = null
     @Volatile private var appInForeground = false
-    private var terminalGeneration = 0
+    @Volatile private var terminalGeneration = 0
+    @Volatile private var imageCheckpoint: ImageStreamCheckpoint? = null
+    private var imageStateProfileId: String? = null
+    private var imageStateWindowId: String? = null
+    private var activeTerminalWindowId: String? = null
+    private var warmTerminalCloseJob: Job? = null
     private var uploadJob: Job? = null
     private var terminalColumns = 80
     private var terminalRows = 24
@@ -268,6 +276,11 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun connect(profile: SshProfile) {
+        cancelWarmTerminalClose()
+        activeTerminalWindowId = null
+        imageCheckpoint = null
+        imageStateProfileId = null
+        imageStateWindowId = null
         applyTerminalTheme(profile.terminalTheme)
         recoveryJob?.cancel()
         recoveryJob = null
@@ -357,11 +370,15 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun createSession(name: String, launchPi: Boolean = false) {
+    fun createSession(
+        name: String,
+        launchPi: Boolean = false,
+        workingDirectory: String = ""
+    ) {
         viewModelScope.launch {
             try {
                 val safeName = name.trim()
-                sshManager.createSession(safeName, launchPi)
+                sshManager.createSession(safeName, launchPi, workingDirectory)
                 val latest = sshManager.listWindows()
                 _windows.value = latest
                 _dashboardMessage.value = null
@@ -378,19 +395,51 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    suspend fun listRemoteDirectories(path: String): RemoteDirectoryListing =
+        sshManager.listRemoteDirectories(path)
+
     fun openWindow(window: TmuxWindow) {
+        cancelWarmTerminalClose()
         _selectedWindow.value = window
         currentProfile()?.let { restoreStore.saveTerminal(it.id, window) }
         _screen.value = AppScreen.Terminal
-        openTerminal(window)
+        if (activeTerminalWindowId == window.windowId && sshManager.isTerminalConnected()) {
+            // Leaving for the dashboard keeps the channels warm briefly. Returning to the same
+            // window can therefore reuse its terminal, cursor, scrollback and decoded image state.
+            _terminalConnected.value = true
+        } else {
+            openTerminal(window)
+        }
     }
 
     private fun openTerminal(window: TmuxWindow) {
+        cancelWarmTerminalClose()
         terminalGeneration++
         val generation = terminalGeneration
+        val profileId = currentProfile()?.id
+        val captureImages = isPiWindow(window)
+        val resumeCheckpoint = imageCheckpoint?.takeIf {
+            captureImages && imageStateProfileId == profileId &&
+                imageStateWindowId == window.windowId && it.windowId == window.windowId
+        }
+
         terminal.reset()
-        imageTerminal.reset()
-        imageTerminal.resize(terminalColumns, terminalRows)
+        if (resumeCheckpoint == null) {
+            imageTerminal.reset()
+            imageTerminal.resize(terminalColumns, terminalRows)
+        }
+        if (captureImages) {
+            imageStateProfileId = profileId
+            imageStateWindowId = window.windowId
+        } else {
+            imageCheckpoint = null
+            imageStateProfileId = null
+            imageStateWindowId = null
+        }
+        activeTerminalWindowId = window.windowId
+        // Replay historical graphics into the shadow terminal first. Publishing each old placement
+        // immediately would flash already-deleted images while returning to a Pi session.
+        imageTerminal.setKittyGraphicsSink(if (captureImages) null else terminal::applyKittyGraphicsCommand)
         _terminalConnected.value = false
         viewModelScope.launch {
             try {
@@ -399,12 +448,37 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                     windowId = window.windowId,
                     columns = terminalColumns,
                     rows = terminalRows,
-                    captureImages = isPiWindow(window),
-                    onBytes = { bytes, length -> terminal.feed(bytes, length) },
-                    onImageBytes = { bytes, length -> imageTerminal.feed(bytes, length) },
+                    captureImages = captureImages,
+                    imageCheckpoint = resumeCheckpoint,
+                    onBytes = { bytes, length ->
+                        if (generation == terminalGeneration) terminal.feed(bytes, length)
+                    },
+                    onImageBytes = { bytes, length ->
+                        if (generation == terminalGeneration) imageTerminal.feed(bytes, length)
+                    },
+                    onImageReplayStart = { resumed ->
+                        if (generation == terminalGeneration && !resumed && resumeCheckpoint != null) {
+                            // The file was replaced or truncated, so its old parser/image state can
+                            // no longer be paired with the new byte stream.
+                            imageCheckpoint = null
+                            imageTerminal.reset()
+                            imageTerminal.resize(terminalColumns, terminalRows)
+                            imageTerminal.setKittyGraphicsSink(null)
+                        }
+                    },
+                    onImageCheckpoint = { checkpoint ->
+                        if (generation == terminalGeneration) imageCheckpoint = checkpoint
+                    },
+                    onImageReplayComplete = {
+                        if (generation == terminalGeneration) {
+                            terminal.replaceKittyGraphicsStateFrom(imageTerminal)
+                            imageTerminal.setKittyGraphicsSink(terminal::applyKittyGraphicsCommand)
+                        }
+                    },
                     onClosed = { exitCode ->
                         viewModelScope.launch {
                             if (generation == terminalGeneration) {
+                                activeTerminalWindowId = null
                                 _terminalConnected.value = false
                                 if (_screen.value == AppScreen.Terminal) {
                                     _notices.tryEmit(
@@ -419,6 +493,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 if (generation == terminalGeneration) _terminalConnected.value = true
             } catch (error: Throwable) {
                 if (generation == terminalGeneration) {
+                    activeTerminalWindowId = null
                     _terminalConnected.value = false
                     _notices.tryEmit(friendlyError(error))
                 }
@@ -436,6 +511,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             // when switching inside the same tmux session.
             viewModelScope.launch {
                 terminalGeneration++
+                activeTerminalWindowId = null
                 sshManager.closeTerminal()
                 openTerminal(window)
             }
@@ -443,6 +519,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             viewModelScope.launch {
                 try {
                     sshManager.selectWindow(window.windowId)
+                    activeTerminalWindowId = window.windowId
                     _windows.value = _windows.value.map {
                         if (it.sessionId == window.sessionId) it.copy(active = it.windowId == window.windowId) else it
                     }
@@ -583,18 +660,40 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         uploadJob?.cancel()
         uploadJob = null
         _uploadProgress.value = null
-        terminalGeneration++
-        _terminalConnected.value = false
         _ctrlActive.value = false
         _selectedWindow.value?.let {
             val profileId = currentProfile()?.id ?: return@let
             restoreStore.saveDashboard(profileId)
             _screen.value = AppScreen.Windows(profileId)
-            viewModelScope.launch { sshManager.closeTerminal() }
+            scheduleWarmTerminalClose()
         } ?: disconnectAndShowHosts()
     }
 
+    private fun scheduleWarmTerminalClose() {
+        cancelWarmTerminalClose()
+        val generation = terminalGeneration
+        val windowId = activeTerminalWindowId ?: return
+        warmTerminalCloseJob = viewModelScope.launch {
+            delay(WARM_TERMINAL_REUSE_MILLIS)
+            if (_screen.value != AppScreen.Terminal &&
+                generation == terminalGeneration && activeTerminalWindowId == windowId
+            ) {
+                terminalGeneration++
+                activeTerminalWindowId = null
+                _terminalConnected.value = false
+                sshManager.closeTerminal()
+            }
+            warmTerminalCloseJob = null
+        }
+    }
+
+    private fun cancelWarmTerminalClose() {
+        warmTerminalCloseJob?.cancel()
+        warmTerminalCloseJob = null
+    }
+
     fun terminateTmuxSession() {
+        cancelWarmTerminalClose()
         if (uploadJob?.isActive == true) {
             _notices.tryEmit("请等待文件上传完成")
             return
@@ -602,6 +701,12 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         val window = _selectedWindow.value ?: return
         val profileId = currentProfile()?.id ?: return
         terminalGeneration++
+        activeTerminalWindowId = null
+        if (imageStateWindowId == window.windowId) {
+            imageCheckpoint = null
+            imageStateProfileId = null
+            imageStateWindowId = null
+        }
         _terminalConnected.value = false
         _ctrlActive.value = false
         restoreStore.saveDashboard(profileId)
@@ -623,6 +728,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun disconnectAndShowHosts() {
+        cancelWarmTerminalClose()
         uploadJob?.cancel()
         uploadJob = null
         _uploadProgress.value = null
@@ -632,6 +738,10 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         connectJob?.cancel()
         refreshJob?.cancel()
         terminalGeneration++
+        activeTerminalWindowId = null
+        imageCheckpoint = null
+        imageStateProfileId = null
+        imageStateWindowId = null
         _connection.value = ConnectionState.Disconnected
         _windows.value = emptyList()
         _selectedWindow.value = null
@@ -706,6 +816,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     override fun onCleared() {
+        cancelWarmTerminalClose()
         uploadJob?.cancel()
         sshManager.dispose()
         super.onCleared()
@@ -713,5 +824,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private const val MAX_UPLOAD_FILES = 20
+        private const val WARM_TERMINAL_REUSE_MILLIS = 30_000L
     }
 }

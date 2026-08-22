@@ -1,7 +1,9 @@
 package com.tmuxer.app.ssh
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TmuxWindowParserTest {
@@ -27,5 +29,30 @@ class TmuxWindowParserTest {
     @Test
     fun rejectsSanitizedTabOutputInsteadOfCreatingCorruptWindow() {
         assertNull(parseTmuxWindow("mobile_\$0_0_@0_bash_1_1_bash_/root_0_0"))
+    }
+
+    @Test
+    fun resumesImageReplayOnlyFromMatchingValidCheckpoint() {
+        val checkpoint = ImageStreamCheckpoint("@7", "/tmp/stream:1:2", 900)
+        val resumed = planImageReplay("@7", "/tmp/stream:1:2", 1_000, checkpoint)
+
+        assertTrue(resumed.resumed)
+        assertEquals(901L, resumed.firstByte)
+        assertEquals(100L, resumed.replayBytes)
+
+        val replaced = planImageReplay("@7", "/tmp/stream:1:3", 1_000, checkpoint)
+        assertFalse(replaced.resumed)
+        assertEquals(1L, replaced.firstByte)
+        assertEquals(1_000L, replaced.replayBytes)
+
+        val large = planImageReplay(
+            "@7",
+            "/tmp/stream:1:2",
+            MAX_IMAGE_STREAM_REPLAY_BYTES.toLong() + 123,
+            null
+        )
+        assertFalse(large.resumed)
+        assertEquals(124L, large.firstByte)
+        assertEquals(MAX_IMAGE_STREAM_REPLAY_BYTES.toLong(), large.replayBytes)
     }
 }

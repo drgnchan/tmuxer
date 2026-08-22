@@ -28,6 +28,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -58,6 +59,7 @@ import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.Layers
@@ -130,6 +132,7 @@ import com.tmuxer.app.data.AuthType
 import com.tmuxer.app.data.ConnectionState
 import com.tmuxer.app.data.SshProfile
 import com.tmuxer.app.data.TmuxWindow
+import com.tmuxer.app.ssh.RemoteDirectoryListing
 import com.tmuxer.app.terminal.TerminalImagePreview
 import com.tmuxer.app.terminal.TerminalTheme
 import com.tmuxer.app.terminal.TerminalView
@@ -200,7 +203,8 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     onRefresh = viewModel::refreshWindows,
                     onRetry = viewModel::retryConnection,
                     onWindow = viewModel::openWindow,
-                    onCreateSession = viewModel::createSession
+                    onCreateSession = viewModel::createSession,
+                    onListRemoteDirectories = viewModel::listRemoteDirectories
                 )
                 AppScreen.Terminal -> TerminalScreen(
                     selected = selectedWindow,
@@ -721,7 +725,8 @@ private fun WindowDashboardScreen(
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onWindow: (TmuxWindow) -> Unit,
-    onCreateSession: (String, Boolean) -> Unit
+    onCreateSession: (String, Boolean, String) -> Unit,
+    onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
     val groups = remember(windows) { windows.groupBy { it.sessionId } }
@@ -825,10 +830,11 @@ private fun WindowDashboardScreen(
     if (showCreateDialog) {
         CreateSessionDialog(
             onDismiss = { showCreateDialog = false },
-            onCreate = { name, launchPi ->
+            onCreate = { name, launchPi, workingDirectory ->
                 showCreateDialog = false
-                onCreateSession(name, launchPi)
-            }
+                onCreateSession(name, launchPi, workingDirectory)
+            },
+            onListRemoteDirectories = onListRemoteDirectories
         )
     }
 }
@@ -1017,9 +1023,15 @@ private fun InlineMessage(message: String) {
 private enum class SessionLaunchMode { SHELL, PI }
 
 @Composable
-private fun CreateSessionDialog(onDismiss: () -> Unit, onCreate: (String, Boolean) -> Unit) {
+private fun CreateSessionDialog(
+    onDismiss: () -> Unit,
+    onCreate: (String, Boolean, String) -> Unit,
+    onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
+) {
     var name by rememberSaveable { mutableStateOf("") }
     var mode by remember { mutableStateOf(SessionLaunchMode.SHELL) }
+    var workingDirectory by rememberSaveable { mutableStateOf("~") }
+    var showDirectoryPicker by remember { mutableStateOf(false) }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {
@@ -1069,17 +1081,177 @@ private fun CreateSessionDialog(onDismiss: () -> Unit, onCreate: (String, Boolea
                     label = "会话名称",
                     placeholder = if (mode == SessionLaunchMode.PI) "pi-workspace" else "workspace"
                 )
+                if (mode == SessionLaunchMode.PI) {
+                    Spacer(Modifier.height(10.dp))
+                    AppTextField(
+                        value = workingDirectory,
+                        onValueChange = { workingDirectory = it.take(512) },
+                        label = "工作目录",
+                        placeholder = "~",
+                        trailing = {
+                            IconButton(onClick = { showDirectoryPicker = true }) {
+                                Icon(Icons.Rounded.FolderOpen, "选择远程工作目录")
+                            }
+                        },
+                        textStyleMonospace = true
+                    )
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        "可直接填写，或点击文件夹浏览远程目录",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
             }
         },
         confirmButton = {
             TextButton(
                 onClick = {
-                    if (name.isNotBlank()) onCreate(name, mode == SessionLaunchMode.PI)
+                    if (name.isNotBlank()) {
+                        onCreate(
+                            name,
+                            mode == SessionLaunchMode.PI,
+                            workingDirectory.takeIf { mode == SessionLaunchMode.PI }?.trim().orEmpty()
+                        )
+                    }
                 },
                 enabled = name.isNotBlank()
             ) {
                 Text(if (mode == SessionLaunchMode.PI) "启动 Pi" else "创建")
             }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+
+    if (showDirectoryPicker) {
+        RemoteDirectoryPicker(
+            initialPath = workingDirectory.ifBlank { "~" },
+            onLoad = onListRemoteDirectories,
+            onDismiss = { showDirectoryPicker = false },
+            onSelect = {
+                workingDirectory = it
+                showDirectoryPicker = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun RemoteDirectoryPicker(
+    initialPath: String,
+    onLoad: suspend (String) -> RemoteDirectoryListing,
+    onDismiss: () -> Unit,
+    onSelect: (String) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    var listing by remember { mutableStateOf<RemoteDirectoryListing?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf<String?>(null) }
+
+    fun load(path: String) {
+        loading = true
+        error = null
+        scope.launch {
+            runCatching { onLoad(path) }
+                .onSuccess { listing = it }
+                .onFailure { error = it.message ?: "无法读取远程目录" }
+            loading = false
+        }
+    }
+
+    LaunchedEffect(initialPath) { load(initialPath) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.FolderOpen, null, tint = Mint) },
+        title = { Text("选择远程工作目录") },
+        text = {
+            Column {
+                Text(
+                    listing?.currentPath ?: initialPath,
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextPrimary,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.height(10.dp))
+                when {
+                    loading -> Box(
+                        Modifier.fillMaxWidth().height(120.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(Modifier.size(24.dp), color = Mint, strokeWidth = 2.dp)
+                    }
+                    error != null -> Column {
+                        Text(error.orEmpty(), color = MaterialTheme.colorScheme.error)
+                        Spacer(Modifier.height(8.dp))
+                        OutlinedButton(onClick = { load("~") }) { Text("返回主目录") }
+                    }
+                    else -> {
+                        listing?.parentPath?.let { parent ->
+                            Surface(
+                                modifier = Modifier.fillMaxWidth().clickable { load(parent) },
+                                color = RaisedSurface,
+                                shape = RoundedCornerShape(10.dp)
+                            ) {
+                                Text("..  上一级", Modifier.padding(horizontal = 12.dp, vertical = 10.dp))
+                            }
+                            Spacer(Modifier.height(5.dp))
+                        }
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 310.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            val directories = listing?.directories.orEmpty()
+                            if (directories.isEmpty()) {
+                                item {
+                                    Text(
+                                        "没有子目录",
+                                        color = TextSecondary,
+                                        modifier = Modifier.padding(vertical = 16.dp)
+                                    )
+                                }
+                            } else {
+                                items(directories, key = { it }) { path ->
+                                    Surface(
+                                        modifier = Modifier.fillMaxWidth().clickable { load(path) },
+                                        color = DeepSurface,
+                                        shape = RoundedCornerShape(9.dp),
+                                        border = BorderStroke(1.dp, Outline.copy(alpha = 0.7f))
+                                    ) {
+                                        Row(
+                                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 9.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(
+                                                Icons.Rounded.FolderOpen,
+                                                null,
+                                                tint = Mint,
+                                                modifier = Modifier.size(17.dp)
+                                            )
+                                            Spacer(Modifier.width(8.dp))
+                                            Text(
+                                                path.substringAfterLast('/').ifEmpty { "/" },
+                                                maxLines = 1,
+                                                overflow = TextOverflow.Ellipsis,
+                                                fontFamily = FontFamily.Monospace,
+                                                style = MaterialTheme.typography.bodySmall
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = !loading && error == null && listing != null,
+                onClick = { listing?.currentPath?.let(onSelect) }
+            ) { Text("选择此目录") }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
@@ -1156,7 +1328,7 @@ private fun TerminalScreen(
             Spacer(Modifier.width(3.dp))
             Column(Modifier.weight(1f)) {
                 Text(
-                    selected?.name ?: "终端",
+                    selected?.let { "\$ ${it.name}" } ?: "\$ 终端",
                     style = MaterialTheme.typography.titleSmall,
                     fontWeight = FontWeight.SemiBold,
                     color = TextPrimary,
@@ -1346,7 +1518,13 @@ private fun TerminalScreen(
     }
 
     imagePreview?.let { preview ->
-        TerminalImagePreviewDialog(preview = preview, onDismiss = { imagePreview = null })
+        TerminalImagePreviewDialog(
+            preview = preview,
+            onDismiss = {
+                terminalViewRef?.suppressKeyboardDoubleTap()
+                imagePreview = null
+            }
+        )
     }
 
     if (showExitSessionDialog) {
@@ -1498,8 +1676,6 @@ private fun WindowTab(
                 fontWeight = FontWeight.Bold,
                 style = MaterialTheme.typography.labelSmall
             )
-            Spacer(Modifier.width(5.dp))
-            Text(window.name, maxLines = 1, style = MaterialTheme.typography.labelSmall)
             if (window.activity && !selected) {
                 Spacer(Modifier.width(4.dp))
                 Box(Modifier.size(4.dp).background(Amber, CircleShape))
@@ -1530,13 +1706,13 @@ private fun SpecialKeyBar(
                 KeyButton("Esc", description = "停止生成") { onKey("\u001B") }
                 KeyButton("^C", description = "清空输入") { onKey("\u0003") }
                 KeyButton("^J", description = "插入换行") { onKey("\u000A") }
-                KeyButton("↵", description = "提交") { onKey("\r") }
-                KeyButton("Alt↵", description = "排队跟进") { onKey("\u001B\r") }
-                KeyButton("^⇧↑", description = "跳到上一条信息") { onKey("\u001B[1;6A") }
-                KeyButton("^⇧↓", description = "跳到下一条信息") { onKey("\u001B[1;6B") }
+                KeyButton("⏎", description = "提交") { onKey("\r") }
+                KeyButton("A+⏎", description = "排队跟进") { onKey("\u001B\r") }
+                KeyButton("C+S+↑", description = "跳到上一条信息") { onKey("\u001B[1;6A") }
+                KeyButton("C+S+↓", description = "跳到下一条信息") { onKey("\u001B[1;6B") }
                 KeyButton("/", description = "输入斜杠命令") { onKey("/") }
                 KeyButton("^L", description = "选择模型") { onKey("\u000C") }
-                KeyButton("⇧Tab", description = "切换思考等级") { onKey("\u001B[Z") }
+                KeyButton("S+Tab", description = "切换思考等级") { onKey("\u001B[Z") }
                 KeyButton("^O", description = "展开工具输出") { onKey("\u000F") }
             } else {
                 KeyButton("Esc", description = "Escape") { onKey("\u001B") }

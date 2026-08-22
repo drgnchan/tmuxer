@@ -85,8 +85,11 @@ class TerminalEmulator(
     initialColumns: Int = 80,
     initialRows: Int = 24,
     private val reply: (String) -> Unit = {},
-    private val kittyGraphicsSink: ((KittyGraphicsCommand) -> Unit)? = null
+    kittyGraphicsSink: ((KittyGraphicsCommand) -> Unit)? = null,
+    private val retainScreenContent: Boolean = true
 ) {
+    @Volatile
+    private var kittyGraphicsSink = kittyGraphicsSink
     private var columns = initialColumns
     private var rows = initialRows
 
@@ -661,6 +664,36 @@ class TerminalEmulator(
         if (sink != null) sink(command) else applyKittyGraphicsCommand(command)
     }
 
+    internal fun setKittyGraphicsSink(sink: ((KittyGraphicsCommand) -> Unit)?) {
+        kittyGraphicsSink = sink
+    }
+
+    /**
+     * Replaces all decoded Kitty image state in one notification. Historical graphics streams can
+     * contain many placements followed by deletes; publishing each replayed command would briefly
+     * draw images that are no longer present when a terminal is restored.
+     */
+    internal fun replaceKittyGraphicsStateFrom(source: TerminalEmulator) {
+        val state = source.copyKittyGraphicsState()
+        synchronized(this) {
+            terminalImages.clear()
+            terminalImages.putAll(state.images)
+            terminalImagePlacements.clear()
+            terminalImagePlacements.putAll(state.placements)
+            terminalImageBytes = state.totalBytes
+            terminalImageGeneration = state.generation
+        }
+        onChanged?.invoke()
+    }
+
+    @Synchronized
+    private fun copyKittyGraphicsState(): KittyGraphicsState = KittyGraphicsState(
+        images = LinkedHashMap(terminalImages),
+        placements = LinkedHashMap(terminalImagePlacements),
+        totalBytes = terminalImageBytes,
+        generation = terminalImageGeneration
+    )
+
     @Synchronized
     internal fun applyKittyGraphicsCommand(command: KittyGraphicsCommand) {
         var changed = false
@@ -759,6 +792,7 @@ class TerminalEmulator(
 
     private fun putText(text: String, requestedWidth: Int) {
         if (requestedWidth <= 0) {
+            if (!retainScreenContent) return
             val previousColumn = (cursorColumn - 1).coerceAtLeast(0)
             val previous = cells[index(previousColumn, cursorRow)]
             if (previous.width == 0 && previousColumn > 0) {
@@ -774,19 +808,21 @@ class TerminalEmulator(
             lineFeed()
             wrapPending = false
         }
-        clearGlyphAt(cursorColumn, cursorRow)
-        if (glyphWidth == 2) clearGlyphAt(cursorColumn + 1, cursorRow)
+        if (retainScreenContent) {
+            clearGlyphAt(cursorColumn, cursorRow)
+            if (glyphWidth == 2) clearGlyphAt(cursorColumn + 1, cursorRow)
 
-        val cell = cells[index(cursorColumn, cursorRow)]
-        cell.text = text
-        cell.width = glyphWidth
-        cell.foreground = foreground
-        cell.background = background
-        cell.bold = bold
-        cell.underline = underline
-        cell.inverse = inverse
-        if (glyphWidth == 2) {
-            cells[index(cursorColumn + 1, cursorRow)] = blankCell().apply { width = 0 }
+            val cell = cells[index(cursorColumn, cursorRow)]
+            cell.text = text
+            cell.width = glyphWidth
+            cell.foreground = foreground
+            cell.background = background
+            cell.bold = bold
+            cell.underline = underline
+            cell.inverse = inverse
+            if (glyphWidth == 2) {
+                cells[index(cursorColumn + 1, cursorRow)] = blankCell().apply { width = 0 }
+            }
         }
         cursorColumn += glyphWidth
         if (cursorColumn >= columns) {
@@ -820,6 +856,7 @@ class TerminalEmulator(
     }
 
     private fun eraseDisplay(mode: Int) {
+        if (!retainScreenContent) return
         when (mode) {
             0 -> {
                 eraseRange(index(cursorColumn, cursorRow), cells.lastIndex)
@@ -835,6 +872,7 @@ class TerminalEmulator(
     }
 
     private fun eraseLine(mode: Int) {
+        if (!retainScreenContent) return
         val start = index(0, cursorRow)
         val end = index(columns - 1, cursorRow)
         when (mode) {
@@ -845,6 +883,7 @@ class TerminalEmulator(
     }
 
     private fun insertCharacters(count: Int) {
+        if (!retainScreenContent) return
         val amount = count.coerceAtMost(columns - cursorColumn)
         val rowStart = index(0, cursorRow)
         for (column in columns - 1 downTo cursorColumn + amount) {
@@ -854,6 +893,7 @@ class TerminalEmulator(
     }
 
     private fun deleteCharacters(count: Int) {
+        if (!retainScreenContent) return
         val amount = count.coerceAtMost(columns - cursorColumn)
         val rowStart = index(0, cursorRow)
         for (column in cursorColumn until columns - amount) {
@@ -863,6 +903,7 @@ class TerminalEmulator(
     }
 
     private fun eraseCharacters(count: Int) {
+        if (!retainScreenContent) return
         eraseRange(
             index(cursorColumn, cursorRow),
             index(min(columns - 1, cursorColumn + count - 1), cursorRow)
@@ -870,20 +911,21 @@ class TerminalEmulator(
     }
 
     private fun insertLines(count: Int) {
-        if (cursorRow !in scrollTop..scrollBottom) return
+        if (!retainScreenContent || cursorRow !in scrollTop..scrollBottom) return
         val amount = count.coerceAtMost(scrollBottom - cursorRow + 1)
         for (row in scrollBottom downTo cursorRow + amount) copyRow(row - amount, row)
         for (row in cursorRow until cursorRow + amount) clearRow(row)
     }
 
     private fun deleteLines(count: Int) {
-        if (cursorRow !in scrollTop..scrollBottom) return
+        if (!retainScreenContent || cursorRow !in scrollTop..scrollBottom) return
         val amount = count.coerceAtMost(scrollBottom - cursorRow + 1)
         for (row in cursorRow..scrollBottom - amount) copyRow(row + amount, row)
         for (row in scrollBottom - amount + 1..scrollBottom) clearRow(row)
     }
 
     private fun scrollUp(count: Int) {
+        if (!retainScreenContent) return
         repeat(count.coerceAtMost(scrollBottom - scrollTop + 1)) {
             // tmux reserves its bottom status row and scrolls only 0..rows-2. The removed top
             // line still belongs in local transcript history whenever the region starts at row 0.
@@ -904,6 +946,7 @@ class TerminalEmulator(
     }
 
     private fun scrollDown(count: Int) {
+        if (!retainScreenContent) return
         repeat(count.coerceAtMost(scrollBottom - scrollTop + 1)) {
             for (row in scrollBottom downTo scrollTop + 1) copyRow(row - 1, row)
             clearRow(scrollTop)
@@ -978,7 +1021,7 @@ class TerminalEmulator(
                             if (enabled) {
                                 savedColumn = cursorColumn
                                 savedRow = cursorRow
-                                alternateCells = freshBuffer(columns, rows)
+                                if (retainScreenContent) alternateCells = freshBuffer(columns, rows)
                                 cursorColumn = 0
                                 cursorRow = 0
                             } else {
@@ -1121,6 +1164,13 @@ class TerminalEmulator(
         val sourceHeight: Int?,
         val offsetX: Int,
         val offsetY: Int
+    )
+
+    private data class KittyGraphicsState(
+        val images: LinkedHashMap<Long, StoredTerminalImage>,
+        val placements: LinkedHashMap<Long, StoredImagePlacement>,
+        val totalBytes: Int,
+        val generation: Long
     )
 
     private enum class ParserState {

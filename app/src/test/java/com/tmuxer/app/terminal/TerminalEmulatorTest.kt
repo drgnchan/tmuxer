@@ -138,6 +138,69 @@ class TerminalEmulatorTest {
     }
 
     @Test
+    fun copiesSelectedTerminalTextWithoutWideCellDuplicates() {
+        val terminal = TerminalEmulator(10, 3)
+        terminal.feed("hello\r\n中文 ok".toByteArray())
+        val snapshot = terminal.snapshot()
+
+        assertEquals("hello", terminalSelectionText(snapshot, 0, 4))
+        assertEquals("hello\n中文 ok", terminalSelectionText(snapshot, 0, 16))
+        assertEquals("中文 ok", terminalSelectionText(snapshot, 16, 10))
+    }
+
+    @Test
+    fun graphicsTrackerPreservesCursorPlacementWithoutRetainingScreenCells() {
+        val visible = TerminalEmulator(20, 5)
+        val tracker = TerminalEmulator(20, 5, retainScreenContent = false)
+        val stream = (
+            "12345678901234567890X" +
+                "\u001B[2K" +
+                "\u001B_Ga=T,f=100,c=4,r=2,i=9;aW1hZ2U=\u001B\\"
+            ).toByteArray()
+
+        visible.feed(stream)
+        tracker.feed(stream)
+
+        val visibleImage = visible.snapshot().images.single()
+        val trackedSnapshot = tracker.snapshot()
+        val trackedImage = trackedSnapshot.images.single()
+        assertEquals(visibleImage.column, trackedImage.column)
+        assertEquals(visibleImage.row, trackedImage.row)
+        assertEquals(visibleImage.columns, trackedImage.columns)
+        assertEquals(visibleImage.rows, trackedImage.rows)
+        assertEquals("image", trackedImage.encodedData.toString(Charsets.UTF_8))
+        assertTrue(trackedSnapshot.cells.all { it.text == " " })
+    }
+
+    @Test
+    fun publishesOnlyFinalImageStateAfterHistoricalReplay() {
+        val visible = TerminalEmulator(20, 8)
+        var visibleChanges = 0
+        visible.onChanged = { visibleChanges++ }
+        val replay = TerminalEmulator(20, 8)
+        replay.feed(
+            ("\u001B_Ga=T,f=100,c=2,r=1,i=1;b2xk\u001B\\" +
+                "\u001B_Ga=d,d=I,i=1,q=2\u001B\\" +
+                "\u001B_Ga=T,f=100,c=3,r=2,i=2;Y3VycmVudA==\u001B\\").toByteArray()
+        )
+
+        assertTrue(visible.snapshot().images.isEmpty())
+        assertEquals(0, visibleChanges)
+
+        visible.replaceKittyGraphicsStateFrom(replay)
+
+        val image = visible.snapshot().images.single()
+        assertEquals(2L, image.imageId)
+        assertEquals("current", image.encodedData.toString(Charsets.UTF_8))
+        assertEquals(1, visibleChanges)
+
+        replay.setKittyGraphicsSink(visible::applyKittyGraphicsCommand)
+        replay.feed("\u001B_Ga=d,d=I,i=2,q=2\u001B\\".toByteArray())
+        assertTrue(visible.snapshot().images.isEmpty())
+        assertEquals(2, visibleChanges)
+    }
+
+    @Test
     fun assemblesAndPlacesChunkedKittyImages() {
         val terminal = TerminalEmulator(20, 8)
         terminal.feed(
