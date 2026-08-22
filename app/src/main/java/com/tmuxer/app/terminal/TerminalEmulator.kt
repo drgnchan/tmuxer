@@ -47,6 +47,8 @@ data class TerminalImagePlacement(
     val imageId: Long,
     val generation: Long,
     val encodedData: ByteArray,
+    val remotePath: String? = null,
+    val mimeType: String? = null,
     val column: Int,
     val row: Int,
     val columns: Int,
@@ -306,6 +308,8 @@ class TerminalEmulator(
                     imageId = placement.imageId,
                     generation = image.generation,
                     encodedData = image.data,
+                    remotePath = image.remotePath,
+                    mimeType = image.mimeType,
                     column = placement.column,
                     row = placement.row,
                     columns = placement.columns,
@@ -668,6 +672,14 @@ class TerminalEmulator(
         kittyGraphicsSink = sink
     }
 
+    /** Keeps this parser's checkpoint state current while also publishing live graphics. */
+    internal fun mirrorKittyGraphicsTo(target: TerminalEmulator) {
+        kittyGraphicsSink = { command ->
+            applyKittyGraphicsCommand(command)
+            target.applyKittyGraphicsCommand(command)
+        }
+    }
+
     /**
      * Replaces all decoded Kitty image state in one notification. Historical graphics streams can
      * contain many placements followed by deletes; publishing each replayed command would briefly
@@ -700,13 +712,25 @@ class TerminalEmulator(
         when (command.action) {
             "T", "t" -> {
                 val imageId = command.controls["i"]?.toLongOrNull() ?: return
-                val data = command.data ?: return
-                if (data.size > MAX_KITTY_IMAGE_BYTES) return
+                val payload = command.data ?: return
+                if (payload.size > MAX_KITTY_IMAGE_BYTES) return
+                val isRemoteReference = command.controls["tmuxer"] == "1" &&
+                    command.controls["t"] == "f"
+                val remotePath = if (isRemoteReference) {
+                    payload.toString(Charsets.UTF_8).takeIf {
+                        it.startsWith('/') && it.length <= MAX_REMOTE_IMAGE_PATH_CHARS && '\u0000' !in it
+                    } ?: return
+                } else {
+                    null
+                }
+                val data = if (remotePath == null) payload else EMPTY_BYTE_ARRAY
                 terminalImages.remove(imageId)?.let { terminalImageBytes -= it.data.size }
                 terminalImageGeneration++
                 terminalImages[imageId] = StoredTerminalImage(
                     generation = terminalImageGeneration,
                     data = data,
+                    remotePath = remotePath,
+                    mimeType = command.controls["M"]?.takeIf { remotePath != null },
                     columns = command.controls.intValue("c", 1, columns),
                     rows = command.controls.intValue("r", 1, rows)
                 )
@@ -1148,6 +1172,8 @@ class TerminalEmulator(
     private data class StoredTerminalImage(
         val generation: Long,
         val data: ByteArray,
+        val remotePath: String?,
+        val mimeType: String?,
         val columns: Int,
         val rows: Int
     )
@@ -1183,7 +1209,8 @@ class TerminalEmulator(
         private const val MAX_KITTY_BASE64_CHARS = 24 * 1024 * 1024
         private const val MAX_KITTY_IMAGE_BYTES = 18 * 1024 * 1024
         private const val MAX_KITTY_TOTAL_BYTES = 36 * 1024 * 1024
-        private const val MAX_KITTY_IMAGES = 16
+        private const val MAX_KITTY_IMAGES = 256
+        private const val MAX_REMOTE_IMAGE_PATH_CHARS = 4_096
         private val DEC_SPECIAL_GRAPHICS = mapOf(
             '`' to "◆", 'a' to "▒", 'b' to "␉", 'c' to "␌", 'd' to "␍",
             'e' to "␊", 'f' to "°", 'g' to "±", 'h' to "␤", 'i' to "␋",

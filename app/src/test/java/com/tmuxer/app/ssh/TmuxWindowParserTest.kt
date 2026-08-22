@@ -32,6 +32,29 @@ class TmuxWindowParserTest {
     }
 
     @Test
+    fun acceptsOnlyGeneratedTerminalImagePaths() {
+        val hash = "0123456789abcdef".repeat(4)
+        assertTrue(
+            isAllowedTerminalImagePath(
+                "/home/raymond",
+                "/home/raymond/.cache/tmuxer/pi-w7.stream.images/$hash.png"
+            )
+        )
+        assertFalse(
+            isAllowedTerminalImagePath(
+                "/home/raymond",
+                "/home/raymond/.ssh/id_ed25519"
+            )
+        )
+        assertFalse(
+            isAllowedTerminalImagePath(
+                "/home/raymond",
+                "/home/raymond/.cache/tmuxer/pi-w7.stream.images/not-a-hash.png"
+            )
+        )
+    }
+
+    @Test
     fun resumesImageReplayOnlyFromMatchingValidCheckpoint() {
         val checkpoint = ImageStreamCheckpoint("@7", "/tmp/stream:1:2", 900)
         val resumed = planImageReplay("@7", "/tmp/stream:1:2", 1_000, checkpoint)

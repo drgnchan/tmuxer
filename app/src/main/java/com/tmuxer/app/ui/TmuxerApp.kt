@@ -133,9 +133,11 @@ import com.tmuxer.app.data.ConnectionState
 import com.tmuxer.app.data.SshProfile
 import com.tmuxer.app.data.TmuxWindow
 import com.tmuxer.app.ssh.RemoteDirectoryListing
+import com.tmuxer.app.terminal.TerminalImageOpenRequest
 import com.tmuxer.app.terminal.TerminalImagePreview
 import com.tmuxer.app.terminal.TerminalTheme
 import com.tmuxer.app.terminal.TerminalView
+import com.tmuxer.app.terminal.decodeTerminalImagePreview
 import com.tmuxer.app.ui.theme.Amber
 import com.tmuxer.app.ui.theme.DeepSurface
 import com.tmuxer.app.ui.theme.Ink
@@ -1300,13 +1302,42 @@ private fun TerminalScreen(
 ) {
     var terminalViewRef by remember { mutableStateOf<TerminalView?>(null) }
     var imagePreview by remember { mutableStateOf<TerminalImagePreview?>(null) }
+    var loadingImage by remember { mutableStateOf(false) }
+    var imageLoadGeneration by remember { mutableStateOf(0L) }
     var showExitSessionDialog by remember(selected?.sessionId) { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
     val uploadProgress by terminalViewModel.uploadProgress.collectAsStateWithLifecycle()
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris -> terminalViewModel.uploadFiles(uris) }
     val hasMultipleSessions = remember(windows) { windows.map { it.sessionId }.distinct().size > 1 }
     val windowIds = remember(windows) { windows.map { it.windowId } }
+    val openTerminalImage: (TerminalImageOpenRequest) -> Unit = { request ->
+        imageLoadGeneration++
+        val generation = imageLoadGeneration
+        loadingImage = true
+        coroutineScope.launch {
+            val result = runCatching {
+                val data = request.remotePath?.let { terminalViewModel.downloadTerminalImage(it) }
+                    ?: request.encodedData
+                val bitmap = withContext(Dispatchers.Default) { decodeTerminalImagePreview(data) }
+                    ?: error("无法识别图片格式")
+                TerminalImagePreview(request.imageId, bitmap, data)
+            }
+            if (generation == imageLoadGeneration) {
+                loadingImage = false
+                result.onSuccess { imagePreview = it }
+                    .onFailure {
+                        Toast.makeText(
+                            context,
+                            it.message ?: "图片加载失败",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+            }
+        }
+    }
     val tabListState = rememberLazyListState()
     LaunchedEffect(selected?.windowId, windowIds) {
         val selectedIndex = windowIds.indexOf(selected?.windowId)
@@ -1434,7 +1465,7 @@ private fun TerminalScreen(
                         emulator = terminalViewModel.terminal
                         onInput = terminalViewModel::sendTerminalInput
                         onTerminalResize = terminalViewModel::resizeTerminal
-                        onImageClick = { imagePreview = it }
+                        onImageClick = openTerminalImage
                     }
                 },
                 update = { view ->
@@ -1442,10 +1473,27 @@ private fun TerminalScreen(
                     view.emulator = terminalViewModel.terminal
                     view.onInput = terminalViewModel::sendTerminalInput
                     view.onTerminalResize = terminalViewModel::resizeTerminal
-                    view.onImageClick = { imagePreview = it }
+                    view.onImageClick = openTerminalImage
                 },
                 modifier = Modifier.fillMaxSize()
             )
+            if (loadingImage) {
+                Surface(
+                    modifier = Modifier.align(Alignment.Center),
+                    color = RaisedSurface.copy(alpha = 0.96f),
+                    shape = CircleShape,
+                    border = BorderStroke(1.dp, Outline)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        CircularProgressIndicator(Modifier.size(16.dp), color = Mint, strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                        Text("正在加载图片…", style = MaterialTheme.typography.labelMedium, color = TextPrimary)
+                    }
+                }
+            }
             uploadProgress?.let { progress ->
                 Surface(
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),

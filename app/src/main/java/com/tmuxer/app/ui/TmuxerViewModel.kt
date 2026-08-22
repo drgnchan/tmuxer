@@ -92,12 +92,13 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         sshManager.writeTerminal(response.toByteArray(Charsets.UTF_8))
     })
     // tmux filters graphics sequences before drawing its client. App-created Pi panes retain a
-    // private raw-output stream; this shadow emulator follows its cursor and forwards only Kitty
-    // image operations into the visible terminal.
+    // private lightweight reference stream; this shadow emulator follows its cursor and forwards
+    // image-link placement operations into the visible terminal.
     private val imageTerminal = TerminalEmulator(
-        kittyGraphicsSink = terminal::applyKittyGraphicsCommand,
         retainScreenContent = false
-    )
+    ).apply {
+        mirrorKittyGraphicsTo(terminal)
+    }
 
     private var refreshJob: Job? = null
     private var connectJob: Job? = null
@@ -398,6 +399,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     suspend fun listRemoteDirectories(path: String): RemoteDirectoryListing =
         sshManager.listRemoteDirectories(path)
 
+    suspend fun downloadTerminalImage(remotePath: String): ByteArray =
+        sshManager.downloadTerminalImage(remotePath)
+
     fun openWindow(window: TmuxWindow) {
         cancelWarmTerminalClose()
         _selectedWindow.value = window
@@ -439,7 +443,11 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         activeTerminalWindowId = window.windowId
         // Replay historical graphics into the shadow terminal first. Publishing each old placement
         // immediately would flash already-deleted images while returning to a Pi session.
-        imageTerminal.setKittyGraphicsSink(if (captureImages) null else terminal::applyKittyGraphicsCommand)
+        if (captureImages) {
+            imageTerminal.setKittyGraphicsSink(null)
+        } else {
+            imageTerminal.mirrorKittyGraphicsTo(terminal)
+        }
         _terminalConnected.value = false
         viewModelScope.launch {
             try {
@@ -472,7 +480,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                     onImageReplayComplete = {
                         if (generation == terminalGeneration) {
                             terminal.replaceKittyGraphicsStateFrom(imageTerminal)
-                            imageTerminal.setKittyGraphicsSink(terminal::applyKittyGraphicsCommand)
+                            imageTerminal.mirrorKittyGraphicsTo(terminal)
                         }
                     },
                     onClosed = { exitCode ->

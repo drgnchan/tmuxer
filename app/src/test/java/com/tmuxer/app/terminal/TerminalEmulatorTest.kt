@@ -194,10 +194,39 @@ class TerminalEmulatorTest {
         assertEquals("current", image.encodedData.toString(Charsets.UTF_8))
         assertEquals(1, visibleChanges)
 
-        replay.setKittyGraphicsSink(visible::applyKittyGraphicsCommand)
-        replay.feed("\u001B_Ga=d,d=I,i=2,q=2\u001B\\".toByteArray())
-        assertTrue(visible.snapshot().images.isEmpty())
-        assertEquals(2, visibleChanges)
+        replay.mirrorKittyGraphicsTo(visible)
+        replay.feed(
+            ("\u001B_Ga=d,d=I,i=2,q=2\u001B\\" +
+                "\u001B_Ga=T,f=100,c=2,r=2,i=3;bGl2ZQ==\u001B\\").toByteArray()
+        )
+        val liveImage = visible.snapshot().images.single()
+        assertEquals(3L, liveImage.imageId)
+        assertEquals("live", liveImage.encodedData.toString(Charsets.UTF_8))
+        assertEquals(3, visibleChanges)
+
+        val restoredAgain = TerminalEmulator(20, 8)
+        restoredAgain.replaceKittyGraphicsStateFrom(replay)
+        val checkpointedLiveImage = restoredAgain.snapshot().images.single()
+        assertEquals(3L, checkpointedLiveImage.imageId)
+        assertEquals("live", checkpointedLiveImage.encodedData.toString(Charsets.UTF_8))
+    }
+
+    @Test
+    fun keepsRemoteKittyImageAsLightweightReference() {
+        val terminal = TerminalEmulator(20, 8)
+        val remotePath = "/home/test/.cache/tmuxer/pi-w7.stream.images/" +
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.png"
+        val payload = java.util.Base64.getEncoder().encodeToString(remotePath.toByteArray())
+
+        terminal.feed(
+            "\u001B_Ga=T,t=f,tmuxer=1,M=image/png,c=10,r=4,i=7;$payload\u001B\\".toByteArray()
+        )
+
+        val image = terminal.snapshot().images.single()
+        assertEquals(7L, image.imageId)
+        assertTrue(image.encodedData.isEmpty())
+        assertEquals(remotePath, image.remotePath)
+        assertEquals("image/png", image.mimeType)
     }
 
     @Test

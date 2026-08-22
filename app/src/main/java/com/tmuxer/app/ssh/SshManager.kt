@@ -89,8 +89,17 @@ internal fun planImageReplay(
 // separator is stable across tmux versions and exceedingly unlikely in user-defined names.
 internal const val TMUX_FIELD_SEPARATOR = "__TMUXER_FIELD_7F3A__"
 internal const val MAX_IMAGE_STREAM_REPLAY_BYTES = 32 * 1024 * 1024
-private const val KITTY_FILTER_BASE64 =
-    "Y29uc3QgZnMgPSByZXF1aXJlKCdub2RlOmZzJyk7CmNvbnN0IG91dHB1dCA9IGZzLmNyZWF0ZVdyaXRlU3RyZWFtKHByb2Nlc3MuYXJndlsyXSwgeyBmbGFnczogJ2EnLCBtb2RlOiAwbzYwMCB9KTsKbGV0IHN0YXRlID0gMDsKcHJvY2Vzcy5zdGRpbi5vbignZGF0YScsIChjaHVuaykgPT4gewogIG91dHB1dC53cml0ZShjaHVuayk7CiAgY29uc3QgY2xlYW4gPSBCdWZmZXIuYWxsb2NVbnNhZmUoY2h1bmsubGVuZ3RoKTsKICBsZXQgbGVuZ3RoID0gMDsKICBmb3IgKGNvbnN0IGJ5dGUgb2YgY2h1bmspIHsKICAgIGlmIChzdGF0ZSA9PT0gMCkgewogICAgICBpZiAoYnl0ZSA9PT0gMHgxYikgc3RhdGUgPSAxOwogICAgICBlbHNlIGNsZWFuW2xlbmd0aCsrXSA9IGJ5dGU7CiAgICB9IGVsc2UgaWYgKHN0YXRlID09PSAxKSB7CiAgICAgIGlmIChieXRlID09PSAweDVmKSBzdGF0ZSA9IDI7CiAgICAgIGVsc2UgewogICAgICAgIGNsZWFuW2xlbmd0aCsrXSA9IDB4MWI7CiAgICAgICAgaWYgKGJ5dGUgPT09IDB4MWIpIHN0YXRlID0gMTsKICAgICAgICBlbHNlIHsgY2xlYW5bbGVuZ3RoKytdID0gYnl0ZTsgc3RhdGUgPSAwOyB9CiAgICAgIH0KICAgIH0gZWxzZSBpZiAoc3RhdGUgPT09IDIpIHsKICAgICAgaWYgKGJ5dGUgPT09IDB4MWIpIHN0YXRlID0gMzsKICAgIH0gZWxzZSBpZiAoYnl0ZSA9PT0gMHg1YykgewogICAgICBzdGF0ZSA9IDA7CiAgICB9IGVsc2UgaWYgKGJ5dGUgIT09IDB4MWIpIHsKICAgICAgc3RhdGUgPSAyOwogICAgfQogIH0KICBpZiAobGVuZ3RoID4gMCkgcHJvY2Vzcy5zdGRvdXQud3JpdGUoY2xlYW4uc3ViYXJyYXkoMCwgbGVuZ3RoKSk7Cn0pOwpwcm9jZXNzLnN0ZGluLm9uKCdlbmQnLCAoKSA9PiBvdXRwdXQuZW5kKCkpOwo="
+private const val MAX_TERMINAL_IMAGE_DOWNLOAD_BYTES = 18 * 1024 * 1024
+private val TERMINAL_IMAGE_RELATIVE_PATH =
+    Regex("pi-w[0-9]+\\.stream\\.images/[0-9a-f]{64}\\.(png|jpg|gif|webp|bin)")
+
+internal fun isAllowedTerminalImagePath(home: String, path: String): Boolean {
+    val safeHome = home.trimEnd('/').ifEmpty { "/" }
+    val cachePrefix = if (safeHome == "/") "/.cache/tmuxer/" else "$safeHome/.cache/tmuxer/"
+    return path.startsWith(cachePrefix) &&
+        TERMINAL_IMAGE_RELATIVE_PATH.matches(path.removePrefix(cachePrefix))
+}
+
 private const val PYTHON_PTY_PROXY_BASE64 =
     "aW1wb3J0IGVycm5vCmltcG9ydCBmY250bAppbXBvcnQgb3MKaW1wb3J0IHNlbGVjdAppbXBvcnQgc2lnbmFsCmltcG9ydCBzeXMKaW1wb3J0IHRlcm1pb3MKaW1wb3J0IHR0eQoKaWYgbGVuKHN5cy5hcmd2KSA8IDI6CiAgICByYWlzZSBTeXN0ZW1FeGl0KCJ1c2FnZTogcHR5LXByb3h5LnB5IENPTU1BTkQgW0FSRyAuLi5dIikKCnN0ZGluX2ZkID0gc3lzLnN0ZGluLmZpbGVubygpCnN0ZG91dF9mZCA9IHN5cy5zdGRvdXQuZmlsZW5vKCkKcGlkLCBtYXN0ZXJfZmQgPSBvcy5mb3JrcHR5KCkKaWYgcGlkID09IDA6CiAgICBvcy5leGVjdnAoc3lzLmFyZ3ZbMV0sIHN5cy5hcmd2WzE6XSkKCm9sZF90ZXJtaW9zID0gTm9uZQoKZGVmIHJlc2l6ZSgqXyk6CiAgICBpZiBub3Qgb3MuaXNhdHR5KHN0ZGluX2ZkKToKICAgICAgICByZXR1cm4KICAgIHRyeToKICAgICAgICBzaXplID0gZmNudGwuaW9jdGwoc3RkaW5fZmQsIHRlcm1pb3MuVElPQ0dXSU5TWiwgYiJcMCIgKiA4KQogICAgICAgIGZjbnRsLmlvY3RsKG1hc3Rlcl9mZCwgdGVybWlvcy5USU9DU1dJTlNaLCBzaXplKQogICAgZXhjZXB0IE9TRXJyb3I6CiAgICAgICAgcGFzcwoKZGVmIGZvcndhcmQoc2lnbnVtLCBfZnJhbWUpOgogICAgdHJ5OgogICAgICAgIG9zLmtpbGwocGlkLCBzaWdudW0pCiAgICBleGNlcHQgUHJvY2Vzc0xvb2t1cEVycm9yOgogICAgICAgIHBhc3MKCmRlZiB3cml0ZV9hbGwoZmQsIGRhdGEpOgogICAgdmlldyA9IG1lbW9yeXZpZXcoZGF0YSkKICAgIHdoaWxlIHZpZXc6CiAgICAgICAgd3JpdHRlbiA9IG9zLndyaXRlKGZkLCB2aWV3KQogICAgICAgIHZpZXcgPSB2aWV3W3dyaXR0ZW46XQoKc2lnbmFsLnNpZ25hbChzaWduYWwuU0lHV0lOQ0gsIHJlc2l6ZSkKZm9yIGZvcndhcmRlZF9zaWduYWwgaW4gKHNpZ25hbC5TSUdIVVAsIHNpZ25hbC5TSUdURVJNKToKICAgIHNpZ25hbC5zaWduYWwoZm9yd2FyZGVkX3NpZ25hbCwgZm9yd2FyZCkKCmlmIG9zLmlzYXR0eShzdGRpbl9mZCk6CiAgICBvbGRfdGVybWlvcyA9IHRlcm1pb3MudGNnZXRhdHRyKHN0ZGluX2ZkKQogICAgdHR5LnNldHJhdyhzdGRpbl9mZCkKcmVzaXplKCkKaW5wdXRzID0gW21hc3Rlcl9mZCwgc3RkaW5fZmRdCnRyeToKICAgIHdoaWxlIG1hc3Rlcl9mZCBpbiBpbnB1dHM6CiAgICAgICAgcmVhZGFibGUsIF8sIF8gPSBzZWxlY3Quc2VsZWN0KGlucHV0cywgW10sIFtdKQogICAgICAgIGlmIHN0ZGluX2ZkIGluIHJlYWRhYmxlOgogICAgICAgICAgICBkYXRhID0gb3MucmVhZChzdGRpbl9mZCwgNjU1MzYpCiAgICAgICAgICAgIGlmIGRhdGE6CiAgICAgICAgICAgICAgICB3cml0ZV9hbGwobWFzdGVyX2ZkLCBkYXRhKQogICAgICAgICAgICBlbHNlOgogICAgICAgICAgICAgICAgaW5wdXRzLnJlbW92ZShzdGRpbl9mZCkKICAgICAgICBpZiBtYXN0ZXJfZmQgaW4gcmVhZGFibGU6CiAgICAgICAgICAgIHRyeToKICAgICAgICAgICAgICAgIGRhdGEgPSBvcy5yZWFkKG1hc3Rlcl9mZCwgNjU1MzYpCiAgICAgICAgICAgIGV4Y2VwdCBPU0Vycm9yIGFzIGVycm9yOgogICAgICAgICAgICAgICAgaWYgZXJyb3IuZXJybm8gPT0gZXJybm8uRUlPOgogICAgICAgICAgICAgICAgICAgIGJyZWFrCiAgICAgICAgICAgICAgICByYWlzZQogICAgICAgICAgICBpZiBub3QgZGF0YToKICAgICAgICAgICAgICAgIGJyZWFrCiAgICAgICAgICAgIHdyaXRlX2FsbChzdGRvdXRfZmQsIGRhdGEpCmV4Y2VwdCBCcm9rZW5QaXBlRXJyb3I6CiAgICB0cnk6CiAgICAgICAgb3Mua2lsbChwaWQsIHNpZ25hbC5TSUdIVVApCiAgICBleGNlcHQgUHJvY2Vzc0xvb2t1cEVycm9yOgogICAgICAgIHBhc3MKZmluYWxseToKICAgIGlmIG9sZF90ZXJtaW9zIGlzIG5vdCBOb25lOgogICAgICAgIHRlcm1pb3MudGNzZXRhdHRyKHN0ZGluX2ZkLCB0ZXJtaW9zLlRDU0FGTFVTSCwgb2xkX3Rlcm1pb3MpCiAgICBvcy5jbG9zZShtYXN0ZXJfZmQpCgpfLCBzdGF0dXMgPSBvcy53YWl0cGlkKHBpZCwgMCkKaWYgaGFzYXR0cihvcywgIndhaXRzdGF0dXNfdG9fZXhpdGNvZGUiKToKICAgIHJhaXNlIFN5c3RlbUV4aXQob3Mud2FpdHN0YXR1c190b19leGl0Y29kZShzdGF0dXMpKQppZiBvcy5XSUZFWElURUQoc3RhdHVzKToKICAgIHJhaXNlIFN5c3RlbUV4aXQob3MuV0VYSVRTVEFUVVMoc3RhdHVzKSkKaWYgb3MuV0lGU0lHTkFMRUQoc3RhdHVzKToKICAgIHJhaXNlIFN5c3RlbUV4aXQoMTI4ICsgb3MuV1RFUk1TSUcoc3RhdHVzKSkKcmFpc2UgU3lzdGVtRXhpdCgxKQo="
 
@@ -235,10 +244,14 @@ class SshManager(context: Context) {
         val createCommand = "tmux new-session -d -s ${shellQuote(safeName)}" +
             if (directorySetup.isNotEmpty()) " -c \"\$START_DIR\"" else ""
         val piLaunchCommand = if (launchPi) {
+            val imageFilterBase64 = Base64.encodeToString(
+                appContext.assets.open("kitty-link-filter.cjs").use { it.readBytes() },
+                Base64.NO_WRAP
+            )
             val target = shellQuote("$safeName:0")
             // Pi normally disables images under tmux. Hide only the multiplexer environment from
-            // Pi, advertise Kitty graphics support, and mirror the pane's raw output before tmux
-            // strips graphics commands. A short delay gives pipe-pane time to attach first.
+            // Pi, advertise Kitty graphics support, and convert graphics into remote files plus
+            // lightweight references before tmux strips the commands.
             val piEnvironment = "env -u TMUX TERM=xterm-256color " +
                 "TERM_PROGRAM=kitty KITTY_WINDOW_ID=tmuxer COLORTERM=truecolor " +
                 "PATH=\"\$(dirname \"\$TMUXER_PI_BIN\"):\$PATH\""
@@ -260,14 +273,18 @@ class SshManager(context: Context) {
                 "then PI_NODE=\"\$(dirname \"\$PI_BIN\")/node\"; fi; " +
                 "tmux set-environment -t $target TMUXER_PI_BIN \"\$PI_BIN\"; " +
                 "mkdir -p \"\$HOME/.cache/tmuxer\"; chmod 700 \"\$HOME/.cache/tmuxer\"; " +
-                "find \"\$HOME/.cache/tmuxer\" -type f -name 'pi-w*.stream' " +
+                "find \"\$HOME/.cache/tmuxer\" -type f " +
+                "\\( -name 'pi-w*.stream' -o -path '*/pi-w*.stream.images/*' \\) " +
                 "-mtime +7 -delete 2>/dev/null || true; " +
+                "find \"\$HOME/.cache/tmuxer\" -depth -type d -name 'pi-w*.stream.images' " +
+                "-empty -delete 2>/dev/null || true; " +
                 "WINDOW_KEY=\$(tmux display-message -p -t $target '#{window_id}' | tr -cd '0-9'); " +
                 "IMAGE_STREAM=\"\$HOME/.cache/tmuxer/pi-w\${WINDOW_KEY}.stream\"; " +
                 "IMAGE_FILTER=\"\$HOME/.cache/tmuxer/kitty-filter.cjs\"; " +
                 "PTY_PROXY=\"\$HOME/.cache/tmuxer/pty-proxy.py\"; " +
                 ": > \"\$IMAGE_STREAM\"; chmod 600 \"\$IMAGE_STREAM\"; " +
-                "printf '%s' ${shellQuote(KITTY_FILTER_BASE64)} | base64 -d > \"\$IMAGE_FILTER\"; " +
+                "rm -rf -- \"\${IMAGE_STREAM}.images\"; " +
+                "printf '%s' ${shellQuote(imageFilterBase64)} | base64 -d > \"\$IMAGE_FILTER\"; " +
                 "printf '%s' ${shellQuote(PYTHON_PTY_PROXY_BASE64)} | base64 -d > \"\$PTY_PROXY\"; " +
                 "chmod 600 \"\$IMAGE_FILTER\" \"\$PTY_PROXY\"; " +
                 "if [ -n \"\$PI_NODE\" ] && " +
@@ -408,6 +425,30 @@ class SshManager(context: Context) {
         }
     }
 
+    suspend fun downloadTerminalImage(remotePath: String): ByteArray = withContext(Dispatchers.IO) {
+        val activeSession = requireSession()
+        val channel = activeSession.openChannel("sftp") as ChannelSftp
+        try {
+            channel.connect(12_000)
+            val home = channel.home.trimEnd('/').ifEmpty { "/" }
+            val canonicalPath = channel.realpath(remotePath)
+            require(isAllowedTerminalImagePath(home, canonicalPath)) { "图片链接无效或已经过期" }
+            val attributes = channel.lstat(canonicalPath)
+            require(attributes.isReg) { "图片链接不是普通文件" }
+            require(attributes.size in 1..MAX_TERMINAL_IMAGE_DOWNLOAD_BYTES.toLong()) {
+                "图片过大，无法预览"
+            }
+            ByteArrayOutputStream(attributes.size.toInt()).use { output ->
+                channel.get(canonicalPath, output)
+                output.toByteArray().also { data ->
+                    require(data.size <= MAX_TERMINAL_IMAGE_DOWNLOAD_BYTES) { "图片过大，无法预览" }
+                }
+            }
+        } finally {
+            runCatching { channel.disconnect() }
+        }
+    }
+
     internal suspend fun openTerminal(
         sessionId: String,
         windowId: String,
@@ -428,7 +469,7 @@ class SshManager(context: Context) {
 
         if (captureImages) {
             // Pi intentionally disables inline graphics when it detects tmux. App-created Pi panes
-            // mirror their raw output to a private stream, allowing Kitty images to be decoded
+            // keep cursor controls and lightweight remote-image references in a private stream,
             // without weakening tmux's normal escape-sequence filtering.
             val imageStreamOpened = runCatching {
                 openImageStream(

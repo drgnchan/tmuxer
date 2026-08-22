@@ -7,7 +7,6 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
-import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.os.SystemClock
@@ -34,7 +33,6 @@ import androidx.core.content.res.ResourcesCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.tmuxer.app.BuildConfig
-import java.util.concurrent.Executors
 import com.tmuxer.app.R
 import kotlin.math.abs
 import kotlin.math.ceil
@@ -46,26 +44,48 @@ private const val PERF_TAG = "TmuxerPerf"
 private const val MAX_DECODED_IMAGE_PIXELS = 8_000_000L
 private const val MAX_DECODED_IMAGE_DIMENSION = 4_096
 
-/** A decoded inline image retained by the terminal while its fullscreen preview is open. */
+/** A decoded image retained only while its fullscreen preview is open. */
 data class TerminalImagePreview(
     val imageId: Long,
     val bitmap: Bitmap,
     val encodedData: ByteArray
 )
 
-private data class TerminalImageCacheKey(val imageId: Long, val generation: Long)
-private data class DecodedTerminalImage(
-    val bitmap: Bitmap,
-    val sourceWidth: Int,
-    val sourceHeight: Int
+data class TerminalImageOpenRequest(
+    val imageId: Long,
+    val encodedData: ByteArray,
+    val remotePath: String?,
+    val mimeType: String?
 )
-private data class TerminalImageHitTarget(val bounds: RectF, val preview: TerminalImagePreview)
+
+private data class TerminalImageHitTarget(val bounds: RectF, val request: TerminalImageOpenRequest)
 private data class TerminalTextSelection(
     val start: Int,
     val end: Int,
     val anchorStart: Int,
     val anchorEnd: Int
 )
+
+internal fun decodeTerminalImagePreview(data: ByteArray): Bitmap? {
+    if (data.isEmpty()) return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(data, 0, data.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+
+    var sampleSize = 1
+    while (
+        bounds.outWidth / sampleSize > MAX_DECODED_IMAGE_DIMENSION ||
+        bounds.outHeight / sampleSize > MAX_DECODED_IMAGE_DIMENSION ||
+        bounds.outWidth.toLong() * bounds.outHeight / sampleSize / sampleSize > MAX_DECODED_IMAGE_PIXELS
+    ) {
+        sampleSize *= 2
+    }
+    val options = BitmapFactory.Options().apply {
+        inSampleSize = sampleSize
+        inPreferredConfig = Bitmap.Config.ARGB_8888
+    }
+    return runCatching { BitmapFactory.decodeByteArray(data, 0, data.size, options) }.getOrNull()
+}
 
 internal fun terminalSelectionText(snapshot: TerminalSnapshot, selectionStart: Int, selectionEnd: Int): String {
     if (snapshot.cells.isEmpty()) return ""
@@ -123,16 +143,13 @@ class TerminalView @JvmOverloads constructor(
         style = Paint.Style.FILL
     }
     private val bitmapPaint = Paint(Paint.FILTER_BITMAP_FLAG)
-    private val imageBitmapCache = object : LruCache<TerminalImageCacheKey, DecodedTerminalImage>(32 * 1024) {
-        override fun sizeOf(key: TerminalImageCacheKey, value: DecodedTerminalImage): Int =
-            (value.bitmap.allocationByteCount / 1024).coerceAtLeast(1)
+    private val imageLinkBackgroundPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
+    private val imageLinkTextPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
+        typeface = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
+        textSize = 13f * resources.displayMetrics.scaledDensity
+        isSubpixelText = true
     }
     private val imageHitTargets = ArrayList<TerminalImageHitTarget>()
-    private val failedImageKeys = LinkedHashSet<TerminalImageCacheKey>()
-    private val pendingImageKeys = HashSet<TerminalImageCacheKey>()
-    private val imageDecodeExecutor = Executors.newSingleThreadExecutor { task ->
-        Thread(task, "tmuxer-image-decode").apply { isDaemon = true }
-    }
     private val regularGlyphWidths = LruCache<String, Float>(512)
     private val boldGlyphWidths = LruCache<String, Float>(512)
     private val textRun = StringBuilder(256)
@@ -237,9 +254,6 @@ class TerminalView @JvmOverloads constructor(
             clearTextSelection()
             cachedSnapshot = null
             imageHitTargets.clear()
-            imageBitmapCache.evictAll()
-            failedImageKeys.clear()
-            pendingImageKeys.clear()
             snapshotDirty = true
             renderDirty = true
             appliedColumns = 0
@@ -250,7 +264,7 @@ class TerminalView @JvmOverloads constructor(
 
     var onInput: (String) -> Unit = {}
     var onTerminalResize: (columns: Int, rows: Int) -> Unit = { _, _ -> }
-    var onImageClick: (TerminalImagePreview) -> Unit = {}
+    var onImageClick: (TerminalImageOpenRequest) -> Unit = {}
 
     init {
         isFocusable = true
@@ -455,28 +469,6 @@ class TerminalView @JvmOverloads constructor(
         imageHitTargets.clear()
         snapshot.images.forEach { placement ->
             if (placement.row >= snapshot.rows || placement.column >= snapshot.columns) return@forEach
-            val key = TerminalImageCacheKey(placement.imageId, placement.generation)
-            if (key in failedImageKeys) return@forEach
-            val decoded = imageBitmapCache.get(key)
-            if (decoded == null) {
-                scheduleImageDecode(key, placement.encodedData)
-                return@forEach
-            }
-
-            val sourceLeft = placement.sourceX.coerceIn(0, decoded.sourceWidth - 1)
-            val sourceTop = placement.sourceY.coerceIn(0, decoded.sourceHeight - 1)
-            val sourceRight = (sourceLeft + (placement.sourceWidth ?: (decoded.sourceWidth - sourceLeft)))
-                .coerceIn(sourceLeft + 1, decoded.sourceWidth)
-            val sourceBottom = (sourceTop + (placement.sourceHeight ?: (decoded.sourceHeight - sourceTop)))
-                .coerceIn(sourceTop + 1, decoded.sourceHeight)
-            val scaleX = decoded.bitmap.width.toFloat() / decoded.sourceWidth
-            val scaleY = decoded.bitmap.height.toFloat() / decoded.sourceHeight
-            val source = Rect(
-                floor(sourceLeft * scaleX).toInt().coerceIn(0, decoded.bitmap.width - 1),
-                floor(sourceTop * scaleY).toInt().coerceIn(0, decoded.bitmap.height - 1),
-                ceil(sourceRight * scaleX).toInt().coerceIn(1, decoded.bitmap.width),
-                ceil(sourceBottom * scaleY).toInt().coerceIn(1, decoded.bitmap.height)
-            )
             val left = horizontalPadding + placement.column * characterWidth + placement.offsetX
             val top = verticalPadding + placement.row * lineHeight + placement.offsetY
             val destination = RectF(
@@ -485,64 +477,59 @@ class TerminalView @JvmOverloads constructor(
                 left + placement.columns * characterWidth,
                 top + placement.rows * lineHeight
             )
-            canvas.drawBitmap(decoded.bitmap, source, destination, bitmapPaint)
-            val hitBounds = RectF(destination)
-            if (hitBounds.intersect(0f, 0f, width.toFloat(), height.toFloat())) {
-                imageHitTargets += TerminalImageHitTarget(
-                    hitBounds,
-                    TerminalImagePreview(placement.imageId, decoded.bitmap, placement.encodedData)
+            val visibleBounds = RectF(destination)
+            if (!visibleBounds.intersect(0f, 0f, width.toFloat(), height.toFloat())) return@forEach
+
+            drawImageLink(canvas, visibleBounds)
+            imageHitTargets += TerminalImageHitTarget(
+                bounds = visibleBounds,
+                request = TerminalImageOpenRequest(
+                    imageId = placement.imageId,
+                    encodedData = placement.encodedData,
+                    remotePath = placement.remotePath,
+                    mimeType = placement.mimeType
                 )
-            }
+            )
         }
     }
 
-    private fun scheduleImageDecode(key: TerminalImageCacheKey, data: ByteArray) {
-        if (!pendingImageKeys.add(key)) return
-        imageDecodeExecutor.execute {
-            val startedNanos = SystemClock.elapsedRealtimeNanos()
-            val decoded = decodeTerminalImage(data)
-            post {
-                pendingImageKeys.remove(key)
-                if (decoded != null) {
-                    imageBitmapCache.put(key, decoded)
-                    perfLog(
-                        "image-decode-ready source=${decoded.sourceWidth}x${decoded.sourceHeight} " +
-                            "decoded=${decoded.bitmap.width}x${decoded.bitmap.height} " +
-                            "durationMs=${"%.2f".format((SystemClock.elapsedRealtimeNanos() - startedNanos) / 1_000_000.0)}"
-                    )
-                } else {
-                    failedImageKeys += key
-                    while (failedImageKeys.size > 32) {
-                        failedImageKeys.remove(failedImageKeys.first())
-                    }
-                }
-                renderDirty = true
-                invalidate()
-            }
-        }
-    }
+    private fun drawImageLink(canvas: Canvas, bounds: RectF) {
+        val label = "图片 · 点击预览"
+        val horizontalInset = 6f * density
+        val verticalInset = 3f * density
+        imageLinkTextPaint.color = terminalTheme.cursorColor
+        val desiredWidth = imageLinkTextPaint.measureText(label) + horizontalInset * 2
+        val chipWidth = desiredWidth.coerceAtMost(bounds.width())
+        val chipHeight = (imageLinkTextPaint.fontSpacing + verticalInset * 2).coerceAtMost(bounds.height())
+        if (chipWidth <= 2f || chipHeight <= 2f) return
 
-    private fun decodeTerminalImage(data: ByteArray): DecodedTerminalImage? {
-        if (data.isEmpty()) return null
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        BitmapFactory.decodeByteArray(data, 0, data.size, bounds)
-        if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+        val chip = RectF(
+            bounds.centerX() - chipWidth / 2f,
+            bounds.centerY() - chipHeight / 2f,
+            bounds.centerX() + chipWidth / 2f,
+            bounds.centerY() + chipHeight / 2f
+        )
+        imageLinkBackgroundPaint.color = if (terminalTheme == TerminalTheme.DARK) {
+            0xE61A2A25.toInt()
+        } else {
+            0xE6E3F3EB.toInt()
+        }
+        canvas.drawRoundRect(chip, 6f * density, 6f * density, imageLinkBackgroundPaint)
 
-        var sampleSize = 1
-        while (
-            bounds.outWidth / sampleSize > MAX_DECODED_IMAGE_DIMENSION ||
-            bounds.outHeight / sampleSize > MAX_DECODED_IMAGE_DIMENSION ||
-            bounds.outWidth.toLong() * bounds.outHeight / sampleSize / sampleSize > MAX_DECODED_IMAGE_PIXELS
-        ) {
-            sampleSize *= 2
-        }
-        val options = BitmapFactory.Options().apply {
-            inSampleSize = sampleSize
-            inPreferredConfig = Bitmap.Config.ARGB_8888
-        }
-        val bitmap = runCatching { BitmapFactory.decodeByteArray(data, 0, data.size, options) }
-            .getOrNull() ?: return null
-        return DecodedTerminalImage(bitmap, bounds.outWidth, bounds.outHeight)
+        val metrics = imageLinkTextPaint.fontMetrics
+        val baseline = chip.centerY() - (metrics.ascent + metrics.descent) / 2f
+        val textLeft = chip.centerX() - imageLinkTextPaint.measureText(label) / 2f
+        canvas.save()
+        canvas.clipRect(chip)
+        canvas.drawText(label, textLeft, baseline, imageLinkTextPaint)
+        canvas.drawRect(
+            textLeft,
+            baseline + density,
+            textLeft + imageLinkTextPaint.measureText(label),
+            baseline + 1.5f * density,
+            imageLinkTextPaint
+        )
+        canvas.restore()
     }
 
     override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: android.graphics.Rect?) {
@@ -682,7 +669,7 @@ class TerminalView @JvmOverloads constructor(
                     val image = imageHitTargets.lastOrNull { it.bounds.contains(event.x, event.y) }
                     if (image != null) {
                         suppressKeyboardDoubleTap()
-                        onImageClick(image.preview)
+                        onImageClick(image.request)
                     } else if (event.eventTime < keyboardTapSuppressedUntil) {
                         lastTapTime = 0L
                     } else {
@@ -932,7 +919,6 @@ class TerminalView @JvmOverloads constructor(
         removeCallbacks(beginLongPressSelection)
         clearTextSelection()
         recycleVelocityTracker()
-        imageDecodeExecutor.shutdownNow()
         super.onDetachedFromWindow()
     }
 
