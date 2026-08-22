@@ -90,8 +90,9 @@ internal fun planImageReplay(
 internal const val TMUX_FIELD_SEPARATOR = "__TMUXER_FIELD_7F3A__"
 internal const val MAX_IMAGE_STREAM_REPLAY_BYTES = 32 * 1024 * 1024
 private const val MAX_TERMINAL_IMAGE_DOWNLOAD_BYTES = 18 * 1024 * 1024
-private val TERMINAL_IMAGE_RELATIVE_PATH =
-    Regex("pi-w[0-9]+(?:\\.stream)?\\.images/[0-9a-f]{64}\\.(png|jpg|gif|webp|bin)")
+private val TERMINAL_IMAGE_RELATIVE_PATH = Regex(
+    "(?:images|pi-w[0-9]+(?:\\.stream)?\\.images)/[0-9a-f]{64}\\.(png|jpg|gif|webp|bin)"
+)
 
 internal fun isAllowedTerminalImagePath(home: String, path: String): Boolean {
     val safeHome = home.trimEnd('/').ifEmpty { "/" }
@@ -262,13 +263,14 @@ class SshManager(context: Context) {
                 "find \"\$HOME/.cache/tmuxer\" -type f " +
                 "\\( -name 'pi-w*.stream' -o -path '*/pi-w*.stream.images/*' " +
                 "-o -path '*/pi-w*.images/*' \\) -mtime +7 -delete 2>/dev/null || true; " +
+                "find \"\$HOME/.cache/tmuxer/images\" -type f -mtime +7 " +
+                "-delete 2>/dev/null || true; " +
                 "find \"\$HOME/.cache/tmuxer\" -depth -type d " +
                 "\\( -name 'pi-w*.stream.images' -o -name 'pi-w*.images' \\) " +
                 "-empty -delete 2>/dev/null || true; " +
-                "WINDOW_KEY=\$(tmux display-message -p -t $target '#{window_id}' | tr -cd '0-9'); " +
-                "IMAGE_DIR=\"\$HOME/.cache/tmuxer/pi-w\${WINDOW_KEY}.images\"; " +
+                "IMAGE_DIR=\"\$HOME/.cache/tmuxer/images\"; " +
                 "IMAGE_EXTENSION=\"\$HOME/.cache/tmuxer/image-links.ts\"; " +
-                "rm -rf -- \"\$IMAGE_DIR\"; mkdir -p \"\$IMAGE_DIR\"; chmod 700 \"\$IMAGE_DIR\"; " +
+                "mkdir -p \"\$IMAGE_DIR\"; chmod 700 \"\$IMAGE_DIR\"; " +
                 "printf '%s' ${shellQuote(imageExtensionBase64)} | base64 -d > \"\$IMAGE_EXTENSION\"; " +
                 "chmod 600 \"\$IMAGE_EXTENSION\"; " +
                 "tmux set-option -w -t $target @tmuxer_image_links 1; " +

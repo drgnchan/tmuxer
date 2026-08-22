@@ -12,8 +12,8 @@ android {
         applicationId = "com.tmuxer.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 27
-        versionName = "1.7.0"
+        versionCode = 28
+        versionName = "1.7.1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

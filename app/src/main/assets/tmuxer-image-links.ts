@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 const MAX_IMAGE_BYTES = 18 * 1024 * 1024;
@@ -18,17 +18,24 @@ function imageExtension(mimeType: string): string {
 
 function saveImage(data: string, mimeType: string): string | undefined {
   if (!imageDirectory) return undefined;
-  const bytes = Buffer.from(data, "base64");
-  if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) return undefined;
-  mkdirSync(imageDirectory, { recursive: true, mode: 0o700 });
-  const hash = createHash("sha256").update(bytes).digest("hex");
-  const remotePath = join(imageDirectory, `${hash}.${imageExtension(mimeType)}`);
-  if (!existsSync(remotePath)) {
-    const temporaryPath = `${remotePath}.${process.pid}.tmp`;
-    writeFileSync(temporaryPath, bytes, { mode: 0o600 });
-    renameSync(temporaryPath, remotePath);
+  try {
+    const bytes = Buffer.from(data, "base64");
+    if (bytes.length === 0 || bytes.length > MAX_IMAGE_BYTES) return undefined;
+    mkdirSync(imageDirectory, { recursive: true, mode: 0o700 });
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const remotePath = join(imageDirectory, `${hash}.${imageExtension(mimeType)}`);
+    if (existsSync(remotePath)) {
+      const now = new Date();
+      utimesSync(remotePath, now, now);
+    } else {
+      const temporaryPath = `${remotePath}.${process.pid}.tmp`;
+      writeFileSync(temporaryPath, bytes, { mode: 0o600 });
+      renameSync(temporaryPath, remotePath);
+    }
+    return remotePath;
+  } catch {
+    return undefined;
   }
-  return remotePath;
 }
 
 function imageHyperlink(remotePath: string): string {
