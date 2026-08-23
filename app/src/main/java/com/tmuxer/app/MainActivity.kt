@@ -1,6 +1,7 @@
 package com.tmuxer.app
 
 import android.os.Bundle
+import android.view.inputmethod.InputMethodManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -28,7 +29,17 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onStop() {
+        hideKeyboardAndClearFocus()
         viewModel.onAppBackgrounded()
         super.onStop()
+    }
+
+    private fun hideKeyboardAndClearFocus() {
+        val focusedView = currentFocus
+        (focusedView?.windowToken ?: window.decorView.windowToken)?.let { token ->
+            getSystemService(InputMethodManager::class.java)
+                .hideSoftInputFromWindow(token, 0)
+        }
+        focusedView?.clearFocus()
     }
 }
