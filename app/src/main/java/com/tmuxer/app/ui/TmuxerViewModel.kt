@@ -37,6 +37,16 @@ import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
 
+private const val BRACKETED_PASTE_START = "\u001B[200~"
+private const val BRACKETED_PASTE_END = "\u001B[201~"
+
+internal fun buildPiUploadInsertion(uploadedPaths: List<String>): String {
+    val references = uploadedPaths.joinToString(separator = " ", postfix = " ") { "@$it" }
+    // Sending @ references as ordinary keystrokes opens Pi's file autocomplete. Bracketed paste
+    // inserts the same references atomically through Pi's paste path, which cancels autocomplete.
+    return "$BRACKETED_PASTE_START$references$BRACKETED_PASTE_END"
+}
+
 data class FileUploadProgress(
     val fileName: String,
     val fileIndex: Int,
@@ -600,7 +610,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 _ctrlActive.value = false
                 val insertion = if (isPiWindow(selected)) {
-                    uploadedPaths.joinToString(separator = " ", postfix = " ") { "@$it" }
+                    buildPiUploadInsertion(uploadedPaths)
                 } else {
                     uploadedPaths.joinToString(separator = " ", postfix = " ") { shellQuoteForTerminal(it) }
                 }
