@@ -54,7 +54,6 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Computer
-import androidx.compose.material.icons.rounded.ContentPaste
 import androidx.compose.material.icons.rounded.DarkMode
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Download
@@ -68,7 +67,6 @@ import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.KeyboardDoubleArrowDown
 import androidx.compose.material.icons.rounded.KeyboardDoubleArrowUp
-import androidx.compose.material.icons.rounded.KeyboardReturn
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Lock
@@ -1386,7 +1384,6 @@ private fun TerminalScreen(
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris -> terminalViewModel.uploadFiles(uris) }
-    val hasMultipleSessions = remember(windows) { windows.map { it.sessionId }.distinct().size > 1 }
     val windowIds = remember(windows) { windows.map { it.windowId } }
     val openTerminalImage: (TerminalImageOpenRequest) -> Unit = { request ->
         imageLoadGeneration++
@@ -1426,47 +1423,13 @@ private fun TerminalScreen(
             modifier = Modifier.fillMaxWidth().height(48.dp).background(DeepSurface).padding(horizontal = 2.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            HighContrastBackButton(
-                onClick = onBack,
-                description = "返回窗口列表",
-                modifier = Modifier.padding(start = 2.dp).size(36.dp)
-            )
-            Spacer(Modifier.width(3.dp))
-            Column(Modifier.weight(1f)) {
-                Text(
-                    selected?.let { "\$ ${it.name}" } ?: "\$ 终端",
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    color = TextPrimary,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    ConnectionDot(connected)
-                    Spacer(Modifier.width(5.dp))
-                    Text(
-                        selected?.let { "${it.sessionName}:${it.index}" } ?: "正在打开…",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = TextSecondary
-                    )
-                }
-            }
+            TerminalBackButton(connected = connected, onClick = onBack)
+            Spacer(Modifier.weight(1f))
             IconButton(onClick = onToggleTheme, modifier = Modifier.size(44.dp)) {
                 Icon(
                     if (terminalTheme == TerminalTheme.DARK) Icons.Rounded.LightMode else Icons.Rounded.DarkMode,
                     if (terminalTheme == TerminalTheme.DARK) "切换为浅色终端" else "切换为深色终端",
                     tint = if (terminalTheme == TerminalTheme.DARK) Amber else TerminalBlue,
-                    modifier = Modifier.size(21.dp)
-                )
-            }
-            IconButton(
-                onClick = { terminalViewRef?.pasteClipboard() },
-                modifier = Modifier.size(44.dp)
-            ) {
-                Icon(
-                    Icons.Rounded.ContentPaste,
-                    "粘贴剪贴板内容",
-                    tint = TextSecondary,
                     modifier = Modifier.size(21.dp)
                 )
             }
@@ -1522,7 +1485,6 @@ private fun TerminalScreen(
                     WindowTab(
                         window = window,
                         selected = selected?.windowId == window.windowId,
-                        showSession = hasMultipleSessions,
                         onClick = { onSwitchWindow(window) }
                     )
                 }
@@ -1775,11 +1737,13 @@ private fun terminalImageFormat(data: ByteArray): Pair<String, String> = when {
     else -> "application/octet-stream" to "bin"
 }
 
+internal fun windowTabLabel(window: TmuxWindow): String =
+    "${window.sessionName}:${window.index}"
+
 @Composable
 private fun WindowTab(
     window: TmuxWindow,
     selected: Boolean,
-    showSession: Boolean,
     onClick: () -> Unit
 ) {
     Surface(
@@ -1794,7 +1758,7 @@ private fun WindowTab(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                if (showSession) "${window.sessionName}:${window.index}" else "${window.index}",
+                windowTabLabel(window),
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 style = MaterialTheme.typography.labelSmall
@@ -1817,7 +1781,10 @@ private fun SpecialKeyBar(
     val firstRowScroll = rememberScrollState()
     val secondRowScroll = rememberScrollState()
     Column(
-        modifier = Modifier.fillMaxWidth().background(DeepSurface).padding(vertical = 4.dp),
+        modifier = Modifier.fillMaxWidth().background(DeepSurface)
+            // Keep the horizontally scrollable second row above Android's mandatory
+            // bottom app-switch gesture region; that system gesture cannot be excluded.
+            .padding(top = 4.dp, bottom = 16.dp),
         verticalArrangement = Arrangement.spacedBy(4.dp)
     ) {
         Row(
@@ -1826,19 +1793,15 @@ private fun SpecialKeyBar(
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             if (piMode) {
-                KeyButton("Esc", description = "停止生成") { onKey("\u001B") }
-                KeyButton("^C", description = "清空输入") { onKey("\u0003") }
-                KeyButton("^J", description = "插入换行") { onKey("\u000A") }
-                KeyButton(icon = Icons.Rounded.KeyboardReturn, description = "提交") {
-                    onKey("\r")
-                }
-                KeyButton("A+Enter", description = "排队跟进") { onKey("\u001B\r") }
-                KeyButton("C+S+↑", description = "跳到上一条信息") { onKey("\u001B[1;6A") }
-                KeyButton("C+S+↓", description = "跳到下一条信息") { onKey("\u001B[1;6B") }
-                KeyButton("/", description = "输入斜杠命令") { onKey("/") }
-                KeyButton("^L", description = "选择模型") { onKey("\u000C") }
-                KeyButton("S+Tab", description = "切换思考等级") { onKey("\u001B[Z") }
-                KeyButton("^O", description = "展开工具输出") { onKey("\u000F") }
+                KeyButton("Esc", description = "停止生成", compact = true) { onKey("\u001B") }
+                KeyButton("/", description = "输入斜杠命令", compact = true) { onKey("/") }
+                KeyButton("^D", description = "删除字符或退出", compact = true) { onKey("\u0004") }
+                KeyButton("^C", description = "清空输入", compact = true) { onKey("\u0003") }
+                KeyButton("^J", description = "插入换行", compact = true) { onKey("\u000A") }
+                KeyButton("^⇧↑", description = "跳到上一条信息", compact = true) { onKey("\u001B[1;6A") }
+                KeyButton("^⇧↓", description = "跳到下一条信息", compact = true) { onKey("\u001B[1;6B") }
+                KeyButton("^T", description = "展开或折叠思考内容", compact = true) { onKey("\u0014") }
+                KeyButton("^O", description = "展开或折叠工具输出", compact = true) { onKey("\u000F") }
             } else {
                 KeyButton("Esc", description = "Escape") { onKey("\u001B") }
                 KeyButton("Ctrl", description = "Control", active = ctrlActive, onClick = onControl)
@@ -1893,11 +1856,12 @@ private fun KeyButton(
     icon: ImageVector? = null,
     description: String = label.orEmpty(),
     active: Boolean = false,
+    compact: Boolean = false,
     onClick: () -> Unit
 ) {
     require(label != null || icon != null) { "按键必须提供文字或图标" }
     Surface(
-        modifier = Modifier.height(30.dp).widthIn(min = 40.dp)
+        modifier = Modifier.height(30.dp).widthIn(min = if (compact) 34.dp else 40.dp)
             .semantics { contentDescription = description }
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(8.dp),
@@ -1905,7 +1869,10 @@ private fun KeyButton(
         contentColor = if (active) Ink else TextPrimary,
         border = BorderStroke(1.dp, if (active) Mint else Outline)
     ) {
-        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 6.dp)) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier.padding(horizontal = if (compact) 4.dp else 6.dp)
+        ) {
             if (icon != null) {
                 Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
             } else {
@@ -1916,6 +1883,30 @@ private fun KeyButton(
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun TerminalBackButton(
+    connected: Boolean,
+    onClick: () -> Unit
+) {
+    Box(Modifier.padding(start = 2.dp).size(40.dp)) {
+        HighContrastBackButton(
+            onClick = onClick,
+            description = "返回窗口列表",
+            modifier = Modifier.align(Alignment.Center).size(36.dp)
+        )
+        Box(
+            Modifier.align(Alignment.BottomEnd)
+                .size(13.dp)
+                .background(DeepSurface, CircleShape)
+                .padding(3.dp)
+                .background(if (connected) Mint else Amber, CircleShape)
+                .semantics {
+                    contentDescription = if (connected) "SSH 已连接" else "SSH 正在连接"
+                }
+        )
     }
 }
 
