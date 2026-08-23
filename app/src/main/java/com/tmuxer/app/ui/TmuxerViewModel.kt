@@ -9,6 +9,7 @@ import com.tmuxer.app.data.AppScreen
 import com.tmuxer.app.data.ConnectionRestoreState
 import com.tmuxer.app.data.ConnectionRestoreStore
 import com.tmuxer.app.data.ConnectionState
+import com.tmuxer.app.data.RecentPiDirectoryStore
 import com.tmuxer.app.data.SecureProfileStore
 import com.tmuxer.app.data.SshProfile
 import com.tmuxer.app.data.TmuxWindow
@@ -50,6 +51,7 @@ data class FileUploadProgress(
 class TmuxerViewModel(application: Application) : AndroidViewModel(application) {
     private val profileStore = SecureProfileStore(application)
     private val restoreStore = ConnectionRestoreStore(application)
+    private val recentPiDirectoryStore = RecentPiDirectoryStore(application)
     private val sshManager = SshManager(application)
 
     private val _profiles = MutableStateFlow(profileStore.load())
@@ -63,6 +65,11 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _windows = MutableStateFlow<List<TmuxWindow>>(emptyList())
     val windows = _windows.asStateFlow()
+
+    private val _recentPiDirectories = MutableStateFlow(
+        restoreStore.load()?.profileId?.let(recentPiDirectoryStore::load).orEmpty()
+    )
+    val recentPiDirectories = _recentPiDirectories.asStateFlow()
 
     private val _refreshing = MutableStateFlow(false)
     val refreshing = _refreshing.asStateFlow()
@@ -127,6 +134,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         val profile = _profiles.value.firstOrNull { it.id == restore.profileId }
         if (profile == null) {
             restoreStore.clear()
+            _recentPiDirectories.value = emptyList()
             return
         }
         if (connectJob?.isActive == true || recoveryJob?.isActive == true) return
@@ -150,6 +158,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun prepareRestoreUi(profile: SshProfile, restore: ConnectionRestoreState) {
+        _recentPiDirectories.value = recentPiDirectoryStore.load(profile.id)
         _connection.value = ConnectionState.Connecting(profile)
         restore.terminalTarget?.let { target ->
             _selectedWindow.value = target.placeholder()
@@ -269,9 +278,11 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun deleteProfile(profile: SshProfile) {
         if (restoreStore.load()?.profileId == profile.id) restoreStore.clear()
+        recentPiDirectoryStore.removeProfile(profile.id)
         val updated = _profiles.value.filterNot { it.id == profile.id }
         _profiles.value = updated
         profileStore.save(updated)
+        _recentPiDirectories.value = emptyList()
         _screen.value = AppScreen.Hosts
     }
 
@@ -285,6 +296,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         recoveryJob?.cancel()
         recoveryJob = null
         restoreStore.saveDashboard(profile.id)
+        _recentPiDirectories.value = recentPiDirectoryStore.load(profile.id)
         connectJob?.cancel()
         refreshJob?.cancel()
         terminalGeneration++
@@ -375,6 +387,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         launchPi: Boolean = false,
         workingDirectory: String = ""
     ) {
+        val profileId = currentProfile()?.id
         viewModelScope.launch {
             try {
                 val safeName = name.trim()
@@ -383,6 +396,15 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 _windows.value = latest
                 _dashboardMessage.value = null
                 val createdWindow = latest.firstOrNull { it.sessionName == safeName }
+                if (launchPi) {
+                    val openedDirectory = createdWindow?.path
+                        ?.takeIf { it.isNotBlank() }
+                        ?: workingDirectory.trim().ifEmpty { "~" }
+                    profileId?.let { id ->
+                        val updated = recentPiDirectoryStore.record(id, openedDirectory)
+                        if (currentProfile()?.id == id) _recentPiDirectories.value = updated
+                    }
+                }
                 if (launchPi && createdWindow != null) {
                     _notices.tryEmit("Pi 工作区 “$safeName” 已启动")
                     openWindow(createdWindow)
@@ -751,6 +773,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         imageStateWindowId = null
         _connection.value = ConnectionState.Disconnected
         _windows.value = emptyList()
+        _recentPiDirectories.value = emptyList()
         _selectedWindow.value = null
         _dashboardMessage.value = null
         _terminalConnected.value = false

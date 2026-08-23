@@ -62,6 +62,13 @@ import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.Keyboard
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowLeft
+import androidx.compose.material.icons.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.KeyboardDoubleArrowDown
+import androidx.compose.material.icons.rounded.KeyboardDoubleArrowUp
+import androidx.compose.material.icons.rounded.KeyboardReturn
 import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Lock
@@ -111,6 +118,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -159,6 +167,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val connection by viewModel.connection.collectAsStateWithLifecycle()
     val windows by viewModel.windows.collectAsStateWithLifecycle()
+    val recentPiDirectories by viewModel.recentPiDirectories.collectAsStateWithLifecycle()
     val refreshing by viewModel.refreshing.collectAsStateWithLifecycle()
     val dashboardMessage by viewModel.dashboardMessage.collectAsStateWithLifecycle()
     val selectedWindow by viewModel.selectedWindow.collectAsStateWithLifecycle()
@@ -199,6 +208,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     profile = profiles.firstOrNull { it.id == destination.profileId },
                     connection = connection,
                     windows = windows,
+                    recentPiDirectories = recentPiDirectories,
                     refreshing = refreshing,
                     dashboardMessage = dashboardMessage,
                     onBack = viewModel::disconnectAndShowHosts,
@@ -721,6 +731,7 @@ private fun WindowDashboardScreen(
     profile: SshProfile?,
     connection: ConnectionState,
     windows: List<TmuxWindow>,
+    recentPiDirectories: List<String>,
     refreshing: Boolean,
     dashboardMessage: String?,
     onBack: () -> Unit,
@@ -831,6 +842,7 @@ private fun WindowDashboardScreen(
 
     if (showCreateDialog) {
         CreateSessionDialog(
+            recentPiDirectories = recentPiDirectories,
             onDismiss = { showCreateDialog = false },
             onCreate = { name, launchPi, workingDirectory ->
                 showCreateDialog = false
@@ -1026,6 +1038,7 @@ private enum class SessionLaunchMode { SHELL, PI }
 
 @Composable
 private fun CreateSessionDialog(
+    recentPiDirectories: List<String>,
     onDismiss: () -> Unit,
     onCreate: (String, Boolean, String) -> Unit,
     onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
@@ -1103,6 +1116,53 @@ private fun CreateSessionDialog(
                         color = TextSecondary,
                         style = MaterialTheme.typography.labelSmall
                     )
+                    if (recentPiDirectories.isNotEmpty()) {
+                        Spacer(Modifier.height(12.dp))
+                        Text(
+                            "最近打开",
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.labelMedium,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Spacer(Modifier.height(7.dp))
+                        LazyRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                            items(recentPiDirectories, key = { it }) { path ->
+                                val selectedPath = workingDirectory.trim().trimEnd('/').ifEmpty { "/" }
+                                val selected = path == selectedPath
+                                Surface(
+                                    modifier = Modifier.widthIn(max = 250.dp).clickable {
+                                        workingDirectory = path
+                                    },
+                                    color = if (selected) Mint.copy(alpha = 0.14f) else DeepSurface,
+                                    shape = RoundedCornerShape(10.dp),
+                                    border = BorderStroke(
+                                        1.dp,
+                                        if (selected) Mint else Outline.copy(alpha = 0.75f)
+                                    )
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(
+                                            Icons.Rounded.FolderOpen,
+                                            null,
+                                            tint = Mint,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(Modifier.width(7.dp))
+                                        Text(
+                                            path,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis,
+                                            fontFamily = FontFamily.Monospace,
+                                            style = MaterialTheme.typography.labelMedium
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         },
@@ -1769,8 +1829,10 @@ private fun SpecialKeyBar(
                 KeyButton("Esc", description = "停止生成") { onKey("\u001B") }
                 KeyButton("^C", description = "清空输入") { onKey("\u0003") }
                 KeyButton("^J", description = "插入换行") { onKey("\u000A") }
-                KeyButton("⏎", description = "提交") { onKey("\r") }
-                KeyButton("A+⏎", description = "排队跟进") { onKey("\u001B\r") }
+                KeyButton(icon = Icons.Rounded.KeyboardReturn, description = "提交") {
+                    onKey("\r")
+                }
+                KeyButton("A+Enter", description = "排队跟进") { onKey("\u001B\r") }
                 KeyButton("C+S+↑", description = "跳到上一条信息") { onKey("\u001B[1;6A") }
                 KeyButton("C+S+↓", description = "跳到下一条信息") { onKey("\u001B[1;6B") }
                 KeyButton("/", description = "输入斜杠命令") { onKey("/") }
@@ -1782,8 +1844,12 @@ private fun SpecialKeyBar(
                 KeyButton("Ctrl", description = "Control", active = ctrlActive, onClick = onControl)
                 KeyButton("Tab") { onKey("\t") }
                 KeyButton("/", description = "输入斜杠") { onKey("/") }
-                KeyButton("Pg↑") { onKey("\u001B[5~") }
-                KeyButton("Pg↓") { onKey("\u001B[6~") }
+                KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowUp, description = "向上翻页") {
+                    onKey("\u001B[5~")
+                }
+                KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowDown, description = "向下翻页") {
+                    onKey("\u001B[6~")
+                }
             }
         }
         Row(
@@ -1795,13 +1861,25 @@ private fun SpecialKeyBar(
                 KeyButton("Ctrl", description = "Control", active = ctrlActive, onClick = onControl)
                 KeyButton("Tab") { onKey("\t") }
             }
-            KeyButton("←") { onKey("\u001B[D") }
-            KeyButton("↓") { onKey("\u001B[B") }
-            KeyButton("↑") { onKey("\u001B[A") }
-            KeyButton("→") { onKey("\u001B[C") }
+            KeyButton(icon = Icons.Rounded.KeyboardArrowLeft, description = "左方向键") {
+                onKey("\u001B[D")
+            }
+            KeyButton(icon = Icons.Rounded.KeyboardArrowDown, description = "下方向键") {
+                onKey("\u001B[B")
+            }
+            KeyButton(icon = Icons.Rounded.KeyboardArrowUp, description = "上方向键") {
+                onKey("\u001B[A")
+            }
+            KeyButton(icon = Icons.Rounded.KeyboardArrowRight, description = "右方向键") {
+                onKey("\u001B[C")
+            }
             if (piMode) {
-                KeyButton("Pg↑") { onKey("\u001B[5~") }
-                KeyButton("Pg↓") { onKey("\u001B[6~") }
+                KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowUp, description = "向上翻页") {
+                    onKey("\u001B[5~")
+                }
+                KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowDown, description = "向下翻页") {
+                    onKey("\u001B[6~")
+                }
             }
             KeyButton("-") { onKey("-") }
             KeyButton("|") { onKey("|") }
@@ -1811,11 +1889,13 @@ private fun SpecialKeyBar(
 
 @Composable
 private fun KeyButton(
-    label: String,
-    description: String = label,
+    label: String? = null,
+    icon: ImageVector? = null,
+    description: String = label.orEmpty(),
     active: Boolean = false,
     onClick: () -> Unit
 ) {
+    require(label != null || icon != null) { "按键必须提供文字或图标" }
     Surface(
         modifier = Modifier.height(30.dp).widthIn(min = 40.dp)
             .semantics { contentDescription = description }
@@ -1826,7 +1906,15 @@ private fun KeyButton(
         border = BorderStroke(1.dp, if (active) Mint else Outline)
     ) {
         Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 6.dp)) {
-            Text(label, fontFamily = FontFamily.Monospace, style = MaterialTheme.typography.labelSmall)
+            if (icon != null) {
+                Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+            } else {
+                Text(
+                    label.orEmpty(),
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
         }
     }
 }
