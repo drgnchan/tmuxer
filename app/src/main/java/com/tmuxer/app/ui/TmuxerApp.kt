@@ -1796,10 +1796,16 @@ private fun SpecialKeyBar(
                 KeyButton("Esc", description = "停止生成", compact = true) { onKey("\u001B") }
                 KeyButton("/", description = "输入斜杠命令", compact = true) { onKey("/") }
                 KeyButton("^D", description = "删除字符或退出", compact = true) { onKey("\u0004") }
-                KeyButton("^C", description = "清空输入", compact = true) { onKey("\u0003") }
+                KeyButton("^U", description = "清空输入", compact = true) { onKey("\u0015") }
                 KeyButton("^J", description = "插入换行", compact = true) { onKey("\u000A") }
-                KeyButton("^⇧↑", description = "跳到上一条信息", compact = true) { onKey("\u001B[1;6A") }
-                KeyButton("^⇧↓", description = "跳到下一条信息", compact = true) { onKey("\u001B[1;6B") }
+                CtrlShiftDirectionButton(
+                    direction = Icons.Rounded.KeyboardArrowUp,
+                    description = "跳到上一条信息"
+                ) { onKey("\u001B[1;6A") }
+                CtrlShiftDirectionButton(
+                    direction = Icons.Rounded.KeyboardArrowDown,
+                    description = "跳到下一条信息"
+                ) { onKey("\u001B[1;6B") }
                 KeyButton("^T", description = "展开或折叠思考内容", compact = true) { onKey("\u0014") }
                 KeyButton("^O", description = "展开或折叠工具输出", compact = true) { onKey("\u000F") }
             } else {
@@ -1851,15 +1857,40 @@ private fun SpecialKeyBar(
 }
 
 @Composable
+private fun CtrlShiftDirectionButton(
+    direction: ImageVector,
+    description: String,
+    onClick: () -> Unit
+) {
+    KeyButton(
+        description = description,
+        compact = true,
+        content = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "^",
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelSmall
+                )
+                Icon(ShiftFilledIcon, contentDescription = null, modifier = Modifier.size(11.dp))
+                Icon(direction, contentDescription = null, modifier = Modifier.size(14.dp))
+            }
+        },
+        onClick = onClick
+    )
+}
+
+@Composable
 private fun KeyButton(
     label: String? = null,
     icon: ImageVector? = null,
     description: String = label.orEmpty(),
     active: Boolean = false,
     compact: Boolean = false,
+    content: (@Composable () -> Unit)? = null,
     onClick: () -> Unit
 ) {
-    require(label != null || icon != null) { "按键必须提供文字或图标" }
+    require(label != null || icon != null || content != null) { "按键必须提供文字、图标或内容" }
     Surface(
         modifier = Modifier.height(30.dp).widthIn(min = if (compact) 34.dp else 40.dp)
             .semantics { contentDescription = description }
@@ -1873,10 +1904,10 @@ private fun KeyButton(
             contentAlignment = Alignment.Center,
             modifier = Modifier.padding(horizontal = if (compact) 4.dp else 6.dp)
         ) {
-            if (icon != null) {
-                Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
-            } else {
-                Text(
+            when {
+                content != null -> content()
+                icon != null -> Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+                else -> Text(
                     label.orEmpty(),
                     fontFamily = FontFamily.Monospace,
                     style = MaterialTheme.typography.labelSmall
