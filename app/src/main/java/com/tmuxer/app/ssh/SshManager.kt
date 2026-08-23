@@ -239,14 +239,19 @@ class SshManager(context: Context) {
         } else {
             ""
         }
-        val createCommand = "tmux new-session -d -s ${shellQuote(safeName)}" +
-            if (directorySetup.isNotEmpty()) " -c \"\$START_DIR\"" else ""
+        val createCommand = buildTmuxNewSessionCommand(
+            sessionName = safeName,
+            captureWindowId = launchPi,
+            useStartDirectory = directorySetup.isNotEmpty()
+        )
         val piLaunchCommand = if (launchPi) {
             val imageExtensionBase64 = Base64.encodeToString(
                 appContext.assets.open("tmuxer-image-links.ts").use { it.readBytes() },
                 Base64.NO_WRAP
             )
-            val target = shellQuote("$safeName:0")
+            // A user's tmux base-index may start at 1 (or another value), so target the stable
+            // window ID printed by new-session instead of assuming every initial window is :0.
+            val target = "\"\$TMUXER_TARGET_WINDOW\""
             // Keep Pi's normal tmux capability detection (so it does not reserve inline-image
             // rows). A temporary extension stores image tool results and inserts one OSC 8 link.
             val piEnvironment = "env TERM=xterm-256color COLORTERM=truecolor " +
@@ -763,8 +768,6 @@ class SshManager(context: Context) {
         return shortened.takeIf { it.isNotBlank() && it != "." && it != ".." } ?: "upload.bin"
     }
 
-    private fun shellQuote(value: String): String = "'" + value.replace("'", "'\"'\"'") + "'"
-
     private data class TerminalWrite(val output: OutputStream, val bytes: ByteArray)
 
     private fun sha256Fingerprint(key: ByteArray): String {
@@ -774,6 +777,26 @@ class SshManager(context: Context) {
 
     private data class CommandResult(val output: String, val error: String, val exitCode: Int)
 }
+
+internal fun buildTmuxNewSessionCommand(
+    sessionName: String,
+    captureWindowId: Boolean,
+    useStartDirectory: Boolean
+): String {
+    val command = buildString {
+        append("tmux new-session -d")
+        if (captureWindowId) append(" -P -F '#{window_id}'")
+        append(" -s ").append(shellQuote(sessionName))
+        if (useStartDirectory) append(" -c \"\$START_DIR\"")
+    }
+    return if (captureWindowId) {
+        "TMUXER_TARGET_WINDOW=\$($command)"
+    } else {
+        command
+    }
+}
+
+private fun shellQuote(value: String): String = "'" + value.replace("'", "'\"'\"'") + "'"
 
 internal fun parseTmuxWindow(line: String): TmuxWindow? {
     val parts = line.split(TMUX_FIELD_SEPARATOR, limit = 11)

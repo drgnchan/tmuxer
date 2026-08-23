@@ -8,6 +8,34 @@ import org.junit.Test
 
 class TmuxWindowParserTest {
     @Test
+    fun piSessionCapturesInitialWindowIdWithoutAssumingBaseIndex() {
+        val command = buildTmuxNewSessionCommand(
+            sessionName = "team's work",
+            captureWindowId = true,
+            useStartDirectory = true
+        )
+
+        assertEquals(
+            "TMUXER_TARGET_WINDOW=\$(tmux new-session -d -P -F '#{window_id}' " +
+                "-s 'team'\"'\"'s work' -c \"\$START_DIR\")",
+            command
+        )
+        assertFalse(command.contains(":0"))
+    }
+
+    @Test
+    fun regularSessionKeepsDirectCreationCommand() {
+        assertEquals(
+            "tmux new-session -d -s 'shell'",
+            buildTmuxNewSessionCommand(
+                sessionName = "shell",
+                captureWindowId = false,
+                useStartDirectory = false
+            )
+        )
+    }
+
+    @Test
     fun parsesPrintableFieldSeparatorUsedByTmux() {
         val line = listOf(
             "mobile", "\$0", "2", "@7", "agent",
