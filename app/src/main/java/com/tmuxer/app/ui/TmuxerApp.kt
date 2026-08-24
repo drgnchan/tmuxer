@@ -826,6 +826,7 @@ private fun WindowDashboardScreen(
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
     val groups = remember(windows) { windows.groupBy { it.sessionId } }
+    val existingSessionNames = remember(windows) { windows.map { it.sessionName }.toSet() }
     val connected = connection is ConnectionState.Connected
 
     Scaffold(
@@ -929,6 +930,7 @@ private fun WindowDashboardScreen(
     if (showCreateDialog) {
         CreateSessionDialog(
             recentPiDirectories = recentPiDirectories,
+            existingSessionNames = existingSessionNames,
             onDismiss = { showCreateDialog = false },
             onCreate = { name, launchPi, workingDirectory ->
                 showCreateDialog = false
@@ -1135,6 +1137,7 @@ private enum class SessionLaunchMode { SHELL, PI }
 @Composable
 private fun CreateSessionDialog(
     recentPiDirectories: List<String>,
+    existingSessionNames: Set<String>,
     onDismiss: () -> Unit,
     onCreate: (String, Boolean, String) -> Unit,
     onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
@@ -1143,6 +1146,11 @@ private fun CreateSessionDialog(
     var mode by remember { mutableStateOf(SessionLaunchMode.SHELL) }
     var workingDirectory by rememberSaveable { mutableStateOf("~") }
     var showDirectoryPicker by remember { mutableStateOf(false) }
+    val resolvedPiSessionName = resolvePiSessionName(
+        requestedName = name,
+        workingDirectory = workingDirectory,
+        existingSessionNames = existingSessionNames
+    )
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {
@@ -1189,10 +1197,16 @@ private fun CreateSessionDialog(
                 AppTextField(
                     value = name,
                     onValueChange = { name = it.replace(' ', '-').take(40) },
-                    label = "会话名称",
-                    placeholder = if (mode == SessionLaunchMode.PI) "pi-workspace" else "workspace"
+                    label = if (mode == SessionLaunchMode.PI) "会话名称（可选）" else "会话名称",
+                    placeholder = if (mode == SessionLaunchMode.PI) "自动：$resolvedPiSessionName" else "workspace"
                 )
                 if (mode == SessionLaunchMode.PI) {
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        "将使用会话名称：$resolvedPiSessionName",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall
+                    )
                     Spacer(Modifier.height(10.dp))
                     AppTextField(
                         value = workingDirectory,
@@ -1265,7 +1279,7 @@ private fun CreateSessionDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    if (name.isNotBlank()) {
+                    if (mode == SessionLaunchMode.PI || name.isNotBlank()) {
                         onCreate(
                             name,
                             mode == SessionLaunchMode.PI,
@@ -1273,7 +1287,7 @@ private fun CreateSessionDialog(
                         )
                     }
                 },
-                enabled = name.isNotBlank()
+                enabled = mode == SessionLaunchMode.PI || name.isNotBlank()
             ) {
                 Text(if (mode == SessionLaunchMode.PI) "启动 Pi" else "创建")
             }
