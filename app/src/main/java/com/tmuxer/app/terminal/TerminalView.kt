@@ -61,6 +61,24 @@ data class TerminalImageOpenRequest(
     val mimeType: String?
 )
 
+internal data class TerminalImeReplacement(val deleteCodePoints: Int, val insertText: String)
+
+internal fun terminalImeReplacement(oldText: String, newText: String): TerminalImeReplacement {
+    var oldOffset = 0
+    var newOffset = 0
+    while (oldOffset < oldText.length && newOffset < newText.length) {
+        val oldCodePoint = oldText.codePointAt(oldOffset)
+        val newCodePoint = newText.codePointAt(newOffset)
+        if (oldCodePoint != newCodePoint) break
+        oldOffset += Character.charCount(oldCodePoint)
+        newOffset += Character.charCount(newCodePoint)
+    }
+    return TerminalImeReplacement(
+        deleteCodePoints = oldText.codePointCount(oldOffset, oldText.length),
+        insertText = newText.substring(newOffset)
+    )
+}
+
 private data class TerminalImageHitTarget(val bounds: RectF, val request: TerminalImageOpenRequest)
 private data class TerminalTextSelection(
     val start: Int,
@@ -1288,6 +1306,10 @@ class TerminalView @JvmOverloads constructor(
             context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
         private var batchEditDepth = 0
         private var imeStateUpdatePending = false
+        // Some predictive IMEs mark already-committed terminal text as composing and then update
+        // that region with setComposingText(). Other compositions (for example pinyin pre-edit)
+        // have not reached the terminal yet. Keep the two cases distinct.
+        private var composingTextIsSent = false
 
         override fun beginBatchEdit(): Boolean {
             batchEditDepth++
@@ -1301,13 +1323,28 @@ class TerminalView @JvmOverloads constructor(
         }
 
         override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            val newText = text?.toString().orEmpty()
+            val (replacedText, replacedTextIsSent) = currentReplacementText()
+            if (replacedTextIsSent) applySentReplacement(replacedText, newText)
+
             val result = super.setComposingText(text, newCursorPosition)
+            composingTextIsSent = replacedTextIsSent && hasComposingText()
             scheduleImeStateUpdate()
             return result
         }
 
         override fun setComposingRegion(start: Int, end: Int): Boolean {
+            val content = editable
+            val previousStart = content?.let(BaseInputConnection::getComposingSpanStart) ?: -1
+            val previousEnd = content?.let(BaseInputConnection::getComposingSpanEnd) ?: -1
+            val regionStart = minOf(start, end)
+            val regionEnd = maxOf(start, end)
+            val overlapsPreviousComposition = previousStart >= 0 && previousEnd > previousStart &&
+                regionStart < previousEnd && regionEnd > previousStart
+            val regionTextIsSent = !overlapsPreviousComposition || composingTextIsSent
+
             val result = super.setComposingRegion(start, end)
+            composingTextIsSent = regionTextIsSent && hasComposingText()
             scheduleImeStateUpdate()
             return result
         }
@@ -1319,9 +1356,14 @@ class TerminalView @JvmOverloads constructor(
         }
 
         override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            val committedText = text?.toString().orEmpty()
+            val (replacedText, replacedTextIsSent) = currentReplacementText()
+            if (replacedTextIsSent) applySentReplacement(replacedText, committedText)
+            else if (committedText.isNotEmpty()) sendCommittedText(committedText)
+
             val result = super.commitText(text, newCursorPosition)
-            text?.takeIf { it.isNotEmpty() }?.let { sendCommittedText(it) }
-            if (text?.any { it == '\n' || it == '\r' } == true) resetEditableContext()
+            composingTextIsSent = false
+            if (committedText.any { it == '\n' || it == '\r' }) resetEditableContext()
             else {
                 trimEditableContext()
                 scheduleImeStateUpdate()
@@ -1330,19 +1372,10 @@ class TerminalView @JvmOverloads constructor(
         }
 
         override fun finishComposingText(): Boolean {
-            val content = editable
-            val composingStart = content?.let(BaseInputConnection::getComposingSpanStart) ?: -1
-            val composingEnd = content?.let(BaseInputConnection::getComposingSpanEnd) ?: -1
-            val committedComposition = if (
-                content != null && composingStart >= 0 && composingEnd > composingStart
-            ) {
-                content.subSequence(composingStart, composingEnd).toString()
-            } else {
-                ""
-            }
-
+            val (composition, compositionIsSent) = currentComposingText()
             val result = super.finishComposingText()
-            if (committedComposition.isNotEmpty()) sendCommittedText(committedComposition)
+            if (!compositionIsSent && composition.isNotEmpty()) sendCommittedText(composition)
+            composingTextIsSent = false
             trimEditableContext()
             scheduleImeStateUpdate()
             return result
@@ -1357,7 +1390,7 @@ class TerminalView @JvmOverloads constructor(
             val cursor = content?.let(Selection::getSelectionStart)?.coerceAtLeast(0) ?: 0
             val deleteStart = (cursor - safeBeforeLength).coerceAtLeast(0)
             val unsentComposingCharacters = if (
-                composingStart >= 0 && composingEnd > composingStart
+                !composingTextIsSent && composingStart >= 0 && composingEnd > composingStart
             ) {
                 (minOf(cursor, composingEnd) - maxOf(deleteStart, composingStart)).coerceAtLeast(0)
             } else {
@@ -1369,6 +1402,7 @@ class TerminalView @JvmOverloads constructor(
             }
             repeat(safeAfterLength) { onInput("\u001B[3~") }
             val result = super.deleteSurroundingText(safeBeforeLength, safeAfterLength)
+            if (!hasComposingText()) composingTextIsSent = false
             scheduleImeStateUpdate()
             return result
         }
@@ -1395,8 +1429,43 @@ class TerminalView @JvmOverloads constructor(
             return true
         }
 
+        private fun currentReplacementText(): Pair<String, Boolean> {
+            val (composition, compositionIsSent) = currentComposingText()
+            if (composition.isNotEmpty()) return composition to compositionIsSent
+
+            val content = editable ?: return "" to false
+            val selectionStart = Selection.getSelectionStart(content)
+            val selectionEnd = Selection.getSelectionEnd(content)
+            if (selectionStart < 0 || selectionEnd < 0 || selectionStart == selectionEnd) {
+                return "" to false
+            }
+            val start = minOf(selectionStart, selectionEnd)
+            val end = maxOf(selectionStart, selectionEnd)
+            return content.subSequence(start, end).toString() to true
+        }
+
+        private fun currentComposingText(): Pair<String, Boolean> {
+            val content = editable ?: return "" to false
+            val start = BaseInputConnection.getComposingSpanStart(content)
+            val end = BaseInputConnection.getComposingSpanEnd(content)
+            if (start < 0 || end <= start) return "" to false
+            return content.subSequence(start, end).toString() to composingTextIsSent
+        }
+
+        private fun hasComposingText(): Boolean {
+            val content = editable ?: return false
+            val start = BaseInputConnection.getComposingSpanStart(content)
+            return start >= 0 && BaseInputConnection.getComposingSpanEnd(content) > start
+        }
+
+        private fun applySentReplacement(oldText: String, newText: String) {
+            val replacement = terminalImeReplacement(oldText, newText)
+            repeat(replacement.deleteCodePoints) { onInput("\u007F") }
+            if (replacement.insertText.isNotEmpty()) sendCommittedText(replacement.insertText)
+        }
+
         private fun sendCommittedText(text: CharSequence) {
-            onInput(text.toString().replace("\n", "\r"))
+            onInput(text.toString().replace("\r\n", "\r").replace("\n", "\r"))
         }
 
         private fun mirrorKeyEventInEditable(event: KeyEvent) {
@@ -1434,6 +1503,7 @@ class TerminalView @JvmOverloads constructor(
             BaseInputConnection.removeComposingSpans(content)
             content.clear()
             Selection.setSelection(content, 0)
+            composingTextIsSent = false
             scheduleImeStateUpdate()
         }
 
