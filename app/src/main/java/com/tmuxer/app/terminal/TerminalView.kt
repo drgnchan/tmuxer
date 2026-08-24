@@ -28,7 +28,6 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.OverScroller
-import android.widget.Toast
 import androidx.core.content.res.ResourcesCompat
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
@@ -305,6 +304,7 @@ class TerminalView @JvmOverloads constructor(
     var onInput: (String) -> Unit = {}
     var onTerminalResize: (columns: Int, rows: Int) -> Unit = { _, _ -> }
     var onImageClick: (TerminalImageOpenRequest) -> Unit = {}
+    var onNotice: (String) -> Unit = {}
 
     init {
         isFocusable = true
@@ -1047,7 +1047,7 @@ class TerminalView @JvmOverloads constructor(
         if (text.isEmpty()) return
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         clipboard.setPrimaryClip(ClipData.newPlainText("终端文本", text))
-        Toast.makeText(context, "已复制终端文本", Toast.LENGTH_SHORT).show()
+        onNotice("已复制终端文本")
     }
 
     private fun clearTextSelection(finishActionMode: Boolean = true) {

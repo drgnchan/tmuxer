@@ -550,9 +550,10 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                                 activeTerminalWindowId = null
                                 _terminalConnected.value = false
                                 if (_screen.value == AppScreen.Terminal) {
-                                    _notices.tryEmit(
-                                        if (exitCode == 0) "终端会话已结束" else "终端连接已关闭"
-                                    )
+                                    // An unexpected channel close is immediately represented by the
+                                    // centered recovery state. Avoid stacking a second transient
+                                    // “连接已关闭” notice, especially if it happened in background.
+                                    if (exitCode == 0) _notices.tryEmit("终端会话已结束")
                                     if (appInForeground) ensureConnectionRestored()
                                 }
                             }
@@ -660,6 +661,10 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 _uploadProgress.value = null
             }
         }
+    }
+
+    fun showNotice(message: String) {
+        if (message.isNotBlank()) _notices.tryEmit(message)
     }
 
     fun sendTerminalInput(text: String) {

@@ -1,6 +1,5 @@
 package com.tmuxer.app.ui
 
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -154,6 +153,7 @@ import com.tmuxer.app.ui.theme.TerminalBlue
 import com.tmuxer.app.ui.theme.TextPrimary
 import com.tmuxer.app.ui.theme.TextSecondary
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -254,7 +254,8 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
         }
         SnackbarHost(
             hostState = snackbarHostState,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp)
+            modifier = Modifier.align(Alignment.Center).padding(horizontal = 24.dp),
+            snackbar = { data -> CenteredNoticePopup(data.visuals.message) }
         )
     }
 }
@@ -296,6 +297,29 @@ private fun ConnectionRecoveryStatusPopup(status: ConnectionRecoveryStatus) {
             Spacer(Modifier.width(11.dp))
             Text(message, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
         }
+    }
+}
+
+@Composable
+private fun CenteredNoticePopup(
+    message: String,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.widthIn(max = 320.dp)
+            .semantics { contentDescription = message },
+        shape = RoundedCornerShape(18.dp),
+        color = RaisedSurface.copy(alpha = 0.97f),
+        contentColor = TextPrimary,
+        border = BorderStroke(1.dp, Outline),
+        shadowElevation = 8.dp
+    ) {
+        Text(
+            text = message,
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+            style = MaterialTheme.typography.bodyMedium,
+            fontWeight = FontWeight.SemiBold
+        )
     }
 }
 
@@ -1454,7 +1478,6 @@ private fun TerminalScreen(
     var imageLoadGeneration by remember { mutableStateOf(0L) }
     var showExitSessionDialog by remember(selected?.sessionId) { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
-    val context = LocalContext.current
     val uploadProgress by terminalViewModel.uploadProgress.collectAsStateWithLifecycle()
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -1476,11 +1499,7 @@ private fun TerminalScreen(
                 loadingImage = false
                 result.onSuccess { imagePreview = it }
                     .onFailure {
-                        Toast.makeText(
-                            context,
-                            it.message ?: "图片加载失败",
-                            Toast.LENGTH_SHORT
-                        ).show()
+                        terminalViewModel.showNotice(it.message ?: "图片加载失败")
                     }
             }
         }
@@ -1578,6 +1597,7 @@ private fun TerminalScreen(
                         onInput = terminalViewModel::sendTerminalInput
                         onTerminalResize = terminalViewModel::resizeTerminal
                         onImageClick = openTerminalImage
+                        onNotice = terminalViewModel::showNotice
                     }
                 },
                 update = { view ->
@@ -1586,6 +1606,7 @@ private fun TerminalScreen(
                     view.onInput = terminalViewModel::sendTerminalInput
                     view.onTerminalResize = terminalViewModel::resizeTerminal
                     view.onImageClick = openTerminalImage
+                    view.onNotice = terminalViewModel::showNotice
                 },
                 modifier = Modifier.fillMaxSize()
             )
@@ -1721,6 +1742,12 @@ private fun TerminalImagePreviewDialog(
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    var saveNotice by remember(preview.imageId) { mutableStateOf<String?>(null) }
+    LaunchedEffect(saveNotice) {
+        val visibleNotice = saveNotice ?: return@LaunchedEffect
+        delay(1_600)
+        if (saveNotice == visibleNotice) saveNotice = null
+    }
     val imageFormat = remember(preview.imageId) { terminalImageFormat(preview.encodedData) }
     val saveImage = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument(imageFormat.first)
@@ -1733,7 +1760,7 @@ private fun TerminalImagePreviewDialog(
                     } ?: error("无法打开目标文件")
                 }.isSuccess
                 withContext(Dispatchers.Main) {
-                    Toast.makeText(context, if (saved) "图片已保存" else "保存图片失败", Toast.LENGTH_SHORT).show()
+                    saveNotice = if (saved) "图片已保存" else "保存图片失败"
                 }
             }
         }
@@ -1768,6 +1795,9 @@ private fun TerminalImagePreviewDialog(
                         }
                         .transformable(transformState)
                 )
+                saveNotice?.let { message ->
+                    CenteredNoticePopup(message, Modifier.align(Alignment.Center))
+                }
                 Surface(
                     modifier = Modifier.align(Alignment.TopEnd).statusBarsPadding().padding(12.dp),
                     shape = RoundedCornerShape(18.dp),
