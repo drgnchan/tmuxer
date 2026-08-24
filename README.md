@@ -5,7 +5,7 @@
 ## 主要功能
 
 - 密码或私钥 SSH 登录
-- 自动发现并切换 tmux session/window
+- 自动发现并切换 tmux session/window，列表内显示 ANSI 彩色终端快照和多 pane 布局
 - 后台或进程回收后自动重连
 - 内置终端，支持中文、Emoji、ANSI 色彩和触摸滚动
 - 双击终端打开键盘，长按选择并复制文本

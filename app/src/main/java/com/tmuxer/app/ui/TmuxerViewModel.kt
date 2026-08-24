@@ -82,6 +82,10 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private val _windows = MutableStateFlow<List<TmuxWindow>>(emptyList())
     val windows = _windows.asStateFlow()
 
+    private val _windowPreviews =
+        MutableStateFlow<Map<String, WindowPreviewUiState>>(emptyMap())
+    internal val windowPreviews = _windowPreviews.asStateFlow()
+
     private val _recentPiDirectories = MutableStateFlow(
         restoreStore.load()?.profileId?.let(recentPiDirectoryStore::load).orEmpty()
     )
@@ -127,6 +131,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private var refreshJob: Job? = null
+    private var windowPreviewJob: Job? = null
+    private val requestedWindowPreviewIds = linkedSetOf<String>()
+    private var visibleWindowPreviewIds = emptySet<String>()
     private var connectJob: Job? = null
     private var recoveryJob: Job? = null
     private var recoveryStatusClearJob: Job? = null
@@ -201,7 +208,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         restore: ConnectionRestoreState
     ) {
         val latest = sshManager.listWindows()
-        _windows.value = latest
+        applyWindowList(latest)
         _dashboardMessage.value = null
         val target = restore.terminalTarget
         if (target == null) {
@@ -244,7 +251,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 val info = sshManager.connect(profile)
                 val latest = sshManager.listWindows()
                 _connection.value = ConnectionState.Connected(info)
-                _windows.value = latest
+                applyWindowList(latest)
                 _dashboardMessage.value = null
                 startAutoRefresh()
 
@@ -339,7 +346,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         terminalGeneration++
         _screen.value = AppScreen.Windows(profile.id)
         _connection.value = ConnectionState.Connecting(profile)
-        _windows.value = emptyList()
+        resetWindowPreviews(clearVisibility = true)
+        applyWindowList(emptyList())
         _dashboardMessage.value = null
         _selectedWindow.value = null
 
@@ -391,7 +399,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun refreshWindowsInternal() {
         try {
             val latest = sshManager.listWindows()
-            _windows.value = latest
+            applyWindowList(latest)
+            requestWindowPreviews(visibleWindowPreviewIds, force = true)
             _dashboardMessage.value = null
             _selectedWindow.value?.let { selected ->
                 _selectedWindow.value = latest.firstOrNull { it.windowId == selected.windowId } ?: selected
@@ -404,6 +413,89 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 refreshJob?.cancel()
             }
             if (appInForeground) ensureConnectionRestored()
+        }
+    }
+
+    fun updateVisibleWindowPreviews(windowIds: Set<String>) {
+        val currentIds = _windows.value.asSequence().map { it.windowId }.toSet()
+        visibleWindowPreviewIds = windowIds.intersect(currentIds)
+        requestWindowPreviews(visibleWindowPreviewIds, force = false)
+    }
+
+    private fun applyWindowList(latest: List<TmuxWindow>) {
+        _windows.value = latest
+        val currentIds = latest.asSequence().map { it.windowId }.toSet()
+        _windowPreviews.value = _windowPreviews.value.filterKeys(currentIds::contains)
+        visibleWindowPreviewIds = visibleWindowPreviewIds.intersect(currentIds)
+        requestedWindowPreviewIds.retainAll(currentIds)
+    }
+
+    private fun resetWindowPreviews(clearVisibility: Boolean) {
+        windowPreviewJob?.cancel()
+        windowPreviewJob = null
+        requestedWindowPreviewIds.clear()
+        _windowPreviews.value = emptyMap()
+        if (clearVisibility) visibleWindowPreviewIds = emptySet()
+    }
+
+    private fun requestWindowPreviews(windowIds: Set<String>, force: Boolean) {
+        if (_connection.value !is ConnectionState.Connected || _screen.value !is AppScreen.Windows) return
+        val currentIds = _windows.value.asSequence().map { it.windowId }.toSet()
+        val targets = windowIds.intersect(currentIds).filterTo(linkedSetOf()) { windowId ->
+            force || _windowPreviews.value[windowId] == null
+        }
+        if (targets.isEmpty()) return
+        requestedWindowPreviewIds += targets
+        if (windowPreviewJob?.isActive == true) return
+
+        windowPreviewJob = viewModelScope.launch {
+            try {
+                // Let LazyColumn settle so a quick fling is represented by one batched SSH call.
+                delay(WINDOW_PREVIEW_DEBOUNCE_MILLIS)
+                while (isActive && _connection.value is ConnectionState.Connected) {
+                    val availableIds = _windows.value.asSequence().map { it.windowId }.toSet()
+                    requestedWindowPreviewIds.retainAll(visibleWindowPreviewIds.intersect(availableIds))
+                    val batch = requestedWindowPreviewIds.take(MAX_WINDOW_PREVIEW_BATCH)
+                    if (batch.isEmpty()) break
+                    requestedWindowPreviewIds.removeAll(batch.toSet())
+
+                    val beforeCapture = _windowPreviews.value.toMutableMap()
+                    batch.forEach { windowId ->
+                        if (beforeCapture[windowId] !is WindowPreviewUiState.Ready) {
+                            beforeCapture[windowId] = WindowPreviewUiState.Loading
+                        }
+                    }
+                    _windowPreviews.value = beforeCapture
+
+                    try {
+                        val captures = sshManager.captureWindowPreviews(batch).associateBy { it.windowId }
+                        val theme = _terminalTheme.value
+                        val updated = _windowPreviews.value.toMutableMap()
+                        batch.forEach { windowId ->
+                            val capture = captures[windowId]
+                            updated[windowId] = if (capture == null) {
+                                WindowPreviewUiState.Unavailable
+                            } else {
+                                WindowPreviewUiState.Ready(
+                                    buildWindowTerminalPreview(capture, theme)
+                                )
+                            }
+                        }
+                        _windowPreviews.value = updated
+                    } catch (error: Throwable) {
+                        if (error is CancellationException) throw error
+                        val updated = _windowPreviews.value.toMutableMap()
+                        batch.forEach { windowId ->
+                            if (updated[windowId] !is WindowPreviewUiState.Ready) {
+                                updated[windowId] = WindowPreviewUiState.Unavailable
+                            }
+                        }
+                        _windowPreviews.value = updated
+                    }
+                }
+            } finally {
+                windowPreviewJob = null
+            }
         }
     }
 
@@ -438,7 +530,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 sshManager.createSession(safeName, launchPi, workingDirectory)
                 val latest = sshManager.listWindows()
-                _windows.value = latest
+                applyWindowList(latest)
                 _dashboardMessage.value = null
                 val createdWindow = latest.firstOrNull { it.sessionName == safeName }
                 if (launchPi) {
@@ -732,6 +824,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private fun applyTerminalTheme(theme: TerminalTheme) {
         _terminalTheme.value = theme
         terminal.setTheme(theme)
+        resetWindowPreviews(clearVisibility = false)
+        requestWindowPreviews(visibleWindowPreviewIds, force = true)
     }
 
     fun resizeTerminal(columns: Int, rows: Int) {
@@ -802,7 +896,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 sshManager.closeTerminal()
                 sshManager.terminateSession(window.sessionId)
-                _windows.value = sshManager.listWindows()
+                applyWindowList(sshManager.listWindows())
+                requestWindowPreviews(visibleWindowPreviewIds, force = true)
                 _dashboardMessage.value = null
                 _notices.tryEmit("tmux 会话 “${window.sessionName}” 已退出")
             } catch (error: Throwable) {
@@ -830,7 +925,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         imageStateProfileId = null
         imageStateWindowId = null
         _connection.value = ConnectionState.Disconnected
-        _windows.value = emptyList()
+        resetWindowPreviews(clearVisibility = true)
+        applyWindowList(emptyList())
         _recentPiDirectories.value = emptyList()
         _selectedWindow.value = null
         _dashboardMessage.value = null
@@ -931,6 +1027,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     override fun onCleared() {
         cancelWarmTerminalClose()
         recoveryStatusClearJob?.cancel()
+        windowPreviewJob?.cancel()
         uploadJob?.cancel()
         sshManager.dispose()
         super.onCleared()
@@ -938,6 +1035,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private const val MAX_UPLOAD_FILES = 20
+        private const val MAX_WINDOW_PREVIEW_BATCH = 12
+        private const val WINDOW_PREVIEW_DEBOUNCE_MILLIS = 120L
         private const val WARM_TERMINAL_REUSE_MILLIS = 30_000L
         private const val RECOVERY_COMPLETE_VISIBLE_MILLIS = 1_600L
     }

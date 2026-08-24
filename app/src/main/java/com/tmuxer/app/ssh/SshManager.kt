@@ -50,6 +50,26 @@ data class RemoteDirectoryListing(
     val directories: List<String>
 )
 
+/** One ANSI-preserving pane capture used to build a window thumbnail on the device. */
+internal data class TmuxPaneCapture(
+    val paneId: String,
+    val left: Int,
+    val top: Int,
+    val width: Int,
+    val height: Int,
+    val cursorColumn: Int,
+    val cursorRow: Int,
+    val active: Boolean,
+    val content: ByteArray
+)
+
+internal data class TmuxWindowCapture(
+    val windowId: String,
+    val columns: Int,
+    val rows: Int,
+    val panes: List<TmuxPaneCapture>
+)
+
 internal data class ImageStreamCheckpoint(
     val windowId: String,
     val streamIdentity: String,
@@ -90,6 +110,10 @@ internal fun planImageReplay(
 internal const val TMUX_FIELD_SEPARATOR = "__TMUXER_FIELD_7F3A__"
 internal const val MAX_IMAGE_STREAM_REPLAY_BYTES = 32 * 1024 * 1024
 private const val MAX_TERMINAL_IMAGE_DOWNLOAD_BYTES = 18 * 1024 * 1024
+private const val MAX_WINDOW_PREVIEW_TARGETS = 12
+private const val MAX_PANE_PREVIEW_BASE64_CHARS = 700_000
+private val TMUX_WINDOW_ID = Regex("@[0-9]+")
+private val TMUX_PANE_ID = Regex("%[0-9]+")
 private val TERMINAL_IMAGE_RELATIVE_PATH = Regex(
     "(?:images|pi-w[0-9]+(?:\\.stream)?\\.images)/[0-9a-f]{64}\\.(png|jpg|gif|webp|bin)"
 )
@@ -205,6 +229,21 @@ class SshManager(context: Context) {
             .mapNotNull(::parseTmuxWindow)
             .toList()
     }
+
+    internal suspend fun captureWindowPreviews(windowIds: Collection<String>): List<TmuxWindowCapture> =
+        withContext(Dispatchers.IO) {
+            val targets = windowIds.asSequence()
+                .filter(TMUX_WINDOW_ID::matches)
+                .distinct()
+                .take(MAX_WINDOW_PREVIEW_TARGETS)
+                .toList()
+            if (targets.isEmpty()) return@withContext emptyList()
+
+            val result = execute(buildWindowPreviewCommand(targets), timeoutMillis = 10_000)
+            // A window or pane can disappear between list-windows and capture-pane. Keep all valid
+            // records instead of failing the whole dashboard preview refresh in that case.
+            parseWindowPreviewCaptures(result.output)
+        }
 
     suspend fun isConnectionHealthy(): Boolean = withContext(Dispatchers.IO) {
         if (session?.isConnected != true) return@withContext false
@@ -797,6 +836,74 @@ internal fun buildTmuxNewSessionCommand(
 }
 
 private fun shellQuote(value: String): String = "'" + value.replace("'", "'\"'\"'") + "'"
+
+/**
+ * Captures every pane independently so split-window layouts can be reconstructed locally. Pane
+ * bytes are base64 encoded remotely, which makes arbitrary terminal control sequences safe to
+ * carry alongside the tab-delimited metadata in one SSH command.
+ */
+internal fun buildWindowPreviewCommand(windowIds: Collection<String>): String {
+    val targets = windowIds.asSequence()
+        .filter(TMUX_WINDOW_ID::matches)
+        .distinct()
+        .take(MAX_WINDOW_PREVIEW_TARGETS)
+        .toList()
+    return buildString {
+        append("export LANG=C.UTF-8 LC_ALL=C.UTF-8; ")
+        targets.forEach { windowId ->
+            append("tmux list-panes -t ").append(shellQuote(windowId))
+            append(" -F '#{pane_id} #{pane_left} #{pane_top} #{pane_width} #{pane_height} #{cursor_x} #{cursor_y} #{pane_active}' 2>/dev/null | ")
+            append("while read -r pane left top width height cursor_x cursor_y active; do ")
+            append("printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t' ")
+            append(shellQuote(windowId))
+            append(" \"\$pane\" \"\$left\" \"\$top\" \"\$width\" \"\$height\" \"\$cursor_x\" \"\$cursor_y\" \"\$active\"; ")
+            append("tmux capture-pane -p -e -t \"\$pane\" 2>/dev/null | base64 | tr -d '\\r\\n'; ")
+            append("printf '\\n'; done; ")
+        }
+    }
+}
+
+internal fun parseWindowPreviewCaptures(output: String): List<TmuxWindowCapture> {
+    val panesByWindow = linkedMapOf<String, MutableList<TmuxPaneCapture>>()
+    output.lineSequence().forEach { line ->
+        val parts = line.split('\t', limit = 10)
+        if (parts.size != 10) return@forEach
+        val windowId = parts[0].takeIf(TMUX_WINDOW_ID::matches) ?: return@forEach
+        val paneId = parts[1].takeIf(TMUX_PANE_ID::matches) ?: return@forEach
+        val left = parts[2].toIntOrNull()?.takeIf { it in 0..1_000 } ?: return@forEach
+        val top = parts[3].toIntOrNull()?.takeIf { it in 0..1_000 } ?: return@forEach
+        val width = parts[4].toIntOrNull()?.takeIf { it in 1..500 } ?: return@forEach
+        val height = parts[5].toIntOrNull()?.takeIf { it in 1..200 } ?: return@forEach
+        val cursorColumn = parts[6].toIntOrNull()?.takeIf { it in 0..width } ?: return@forEach
+        val cursorRow = parts[7].toIntOrNull()?.takeIf { it in 0 until height } ?: return@forEach
+        if (left + width > 1_000 || top + height > 500) return@forEach
+        val encoded = parts[9].takeIf {
+            it.isNotEmpty() && it.length <= MAX_PANE_PREVIEW_BASE64_CHARS
+        } ?: return@forEach
+        val content = runCatching { java.util.Base64.getDecoder().decode(encoded) }.getOrNull()
+            ?: return@forEach
+        panesByWindow.getOrPut(windowId, ::mutableListOf) += TmuxPaneCapture(
+            paneId = paneId,
+            left = left,
+            top = top,
+            width = width,
+            height = height,
+            cursorColumn = cursorColumn,
+            cursorRow = cursorRow,
+            active = parts[8] == "1",
+            content = content
+        )
+    }
+    return panesByWindow.mapNotNull { (windowId, panes) ->
+        if (panes.isEmpty()) return@mapNotNull null
+        TmuxWindowCapture(
+            windowId = windowId,
+            columns = panes.maxOf { it.left + it.width },
+            rows = panes.maxOf { it.top + it.height },
+            panes = panes
+        )
+    }
+}
 
 internal fun parseTmuxWindow(line: String): TmuxWindow? {
     val parts = line.split(TMUX_FIELD_SEPARATOR, limit = 11)
