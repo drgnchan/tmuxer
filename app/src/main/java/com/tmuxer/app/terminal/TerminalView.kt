@@ -12,6 +12,7 @@ import android.graphics.Typeface
 import android.os.SystemClock
 import android.os.Trace
 import android.text.InputType
+import android.text.Selection
 import android.util.AttributeSet
 import android.util.Log
 import android.util.LruCache
@@ -44,6 +45,7 @@ private const val PERF_TAG = "TmuxerPerf"
 private const val MAX_DECODED_IMAGE_PIXELS = 8_000_000L
 private const val MAX_DECODED_IMAGE_DIMENSION = 4_096
 private const val TERMINAL_IMAGE_LINK_PREFIX = "tmuxer-image://"
+private const val MAX_IME_CONTEXT_CHARS = 1_024
 
 /** A decoded image retained only while its fullscreen preview is open. */
 data class TerminalImagePreview(
@@ -1279,42 +1281,179 @@ class TerminalView @JvmOverloads constructor(
     }
 
     private inner class TerminalInputConnection : BaseInputConnection(this@TerminalView, true) {
-        // Keep a real Editable, as Termux does. The previous dummy connection discarded IME
-        // composition/selection state, so Android positioned its insertion cursor several cells
-        // to the left while composing text.
-        override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-            super.commitText(text, newCursorPosition)
-            flushEditableToTerminal()
+        // Keep committed text in this private Editable as IME-only context. Clearing it after every
+        // character made the terminal and keyboard disagree: backspace changed the terminal while
+        // candidate text stayed unchanged, and the empty context kept one-shot Shift enabled.
+        private val inputMethodManager =
+            context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        private var batchEditDepth = 0
+        private var imeStateUpdatePending = false
+
+        override fun beginBatchEdit(): Boolean {
+            batchEditDepth++
             return true
+        }
+
+        override fun endBatchEdit(): Boolean {
+            if (batchEditDepth > 0) batchEditDepth--
+            if (batchEditDepth == 0 && imeStateUpdatePending) reportImeState()
+            return batchEditDepth > 0
+        }
+
+        override fun setComposingText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            val result = super.setComposingText(text, newCursorPosition)
+            scheduleImeStateUpdate()
+            return result
+        }
+
+        override fun setComposingRegion(start: Int, end: Int): Boolean {
+            val result = super.setComposingRegion(start, end)
+            scheduleImeStateUpdate()
+            return result
+        }
+
+        override fun setSelection(start: Int, end: Int): Boolean {
+            val result = super.setSelection(start, end)
+            scheduleImeStateUpdate()
+            return result
+        }
+
+        override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+            val result = super.commitText(text, newCursorPosition)
+            text?.takeIf { it.isNotEmpty() }?.let { sendCommittedText(it) }
+            if (text?.any { it == '\n' || it == '\r' } == true) resetEditableContext()
+            else {
+                trimEditableContext()
+                scheduleImeStateUpdate()
+            }
+            return result
         }
 
         override fun finishComposingText(): Boolean {
-            super.finishComposingText()
-            flushEditableToTerminal()
-            return true
+            val content = editable
+            val composingStart = content?.let(BaseInputConnection::getComposingSpanStart) ?: -1
+            val composingEnd = content?.let(BaseInputConnection::getComposingSpanEnd) ?: -1
+            val committedComposition = if (
+                content != null && composingStart >= 0 && composingEnd > composingStart
+            ) {
+                content.subSequence(composingStart, composingEnd).toString()
+            } else {
+                ""
+            }
+
+            val result = super.finishComposingText()
+            if (committedComposition.isNotEmpty()) sendCommittedText(committedComposition)
+            trimEditableContext()
+            scheduleImeStateUpdate()
+            return result
         }
 
         override fun deleteSurroundingText(beforeLength: Int, afterLength: Int): Boolean {
-            repeat(beforeLength.coerceAtLeast(1)) { onInput("\u007F") }
-            return super.deleteSurroundingText(beforeLength, afterLength)
+            val safeBeforeLength = beforeLength.coerceAtLeast(0)
+            val safeAfterLength = afterLength.coerceAtLeast(0)
+            val content = editable
+            val composingStart = content?.let(BaseInputConnection::getComposingSpanStart) ?: -1
+            val composingEnd = content?.let(BaseInputConnection::getComposingSpanEnd) ?: -1
+            val cursor = content?.let(Selection::getSelectionStart)?.coerceAtLeast(0) ?: 0
+            val deleteStart = (cursor - safeBeforeLength).coerceAtLeast(0)
+            val unsentComposingCharacters = if (
+                composingStart >= 0 && composingEnd > composingStart
+            ) {
+                (minOf(cursor, composingEnd) - maxOf(deleteStart, composingStart)).coerceAtLeast(0)
+            } else {
+                0
+            }
+
+            repeat((safeBeforeLength - unsentComposingCharacters).coerceAtLeast(0)) {
+                onInput("\u007F")
+            }
+            repeat(safeAfterLength) { onInput("\u001B[3~") }
+            val result = super.deleteSurroundingText(safeBeforeLength, safeAfterLength)
+            scheduleImeStateUpdate()
+            return result
         }
 
-        private fun flushEditableToTerminal() {
-            val content = editable ?: return
-            if (content.isNotEmpty()) onInput(content.toString())
-            content.clear()
-        }
+        override fun getCursorCapsMode(reqModes: Int): Int = 0
 
         override fun sendKeyEvent(event: KeyEvent): Boolean {
-            if (event.action == KeyEvent.ACTION_DOWN) {
-                return this@TerminalView.dispatchKeyEvent(event)
+            if (event.action != KeyEvent.ACTION_DOWN) return true
+
+            if (event.keyCode == KeyEvent.KEYCODE_ENTER ||
+                event.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+            ) {
+                finishComposingText()
             }
-            return true
+            val handled = this@TerminalView.dispatchKeyEvent(event)
+            if (handled) mirrorKeyEventInEditable(event)
+            return handled
         }
 
         override fun performEditorAction(actionCode: Int): Boolean {
+            finishComposingText()
             onInput("\r")
+            resetEditableContext()
             return true
+        }
+
+        private fun sendCommittedText(text: CharSequence) {
+            onInput(text.toString().replace("\n", "\r"))
+        }
+
+        private fun mirrorKeyEventInEditable(event: KeyEvent) {
+            when (event.keyCode) {
+                KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> resetEditableContext()
+                KeyEvent.KEYCODE_DEL -> {
+                    super.deleteSurroundingText(1, 0)
+                    scheduleImeStateUpdate()
+                }
+                KeyEvent.KEYCODE_FORWARD_DEL -> {
+                    super.deleteSurroundingText(0, 1)
+                    scheduleImeStateUpdate()
+                }
+                else -> {
+                    val unicode = event.unicodeChar
+                    if (unicode > 0 && !event.isCtrlPressed) {
+                        super.commitText(String(Character.toChars(unicode)), 1)
+                        trimEditableContext()
+                        scheduleImeStateUpdate()
+                    }
+                }
+            }
+        }
+
+        private fun trimEditableContext() {
+            val content = editable ?: return
+            val composingStart = BaseInputConnection.getComposingSpanStart(content)
+            val removableLength = if (composingStart >= 0) composingStart else content.length
+            val overflow = (content.length - MAX_IME_CONTEXT_CHARS).coerceAtMost(removableLength)
+            if (overflow > 0) content.delete(0, overflow)
+        }
+
+        private fun resetEditableContext() {
+            val content = editable ?: return
+            BaseInputConnection.removeComposingSpans(content)
+            content.clear()
+            Selection.setSelection(content, 0)
+            scheduleImeStateUpdate()
+        }
+
+        private fun scheduleImeStateUpdate() {
+            if (batchEditDepth > 0) imeStateUpdatePending = true
+            else reportImeState()
+        }
+
+        private fun reportImeState() {
+            imeStateUpdatePending = false
+            val content = editable ?: return
+            val selectionStart = Selection.getSelectionStart(content).coerceAtLeast(0)
+            val selectionEnd = Selection.getSelectionEnd(content).coerceAtLeast(0)
+            inputMethodManager.updateSelection(
+                this@TerminalView,
+                selectionStart,
+                selectionEnd,
+                BaseInputConnection.getComposingSpanStart(content),
+                BaseInputConnection.getComposingSpanEnd(content)
+            )
         }
     }
 }
