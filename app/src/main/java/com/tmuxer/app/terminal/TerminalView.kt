@@ -26,6 +26,8 @@ import android.view.View
 import android.view.ViewConfiguration
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.ExtractedText
+import android.view.inputmethod.ExtractedTextRequest
 import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.OverScroller
@@ -1257,6 +1259,9 @@ class TerminalView @JvmOverloads constructor(
             EditorInfo.IME_FLAG_NO_EXTRACT_UI or
             EditorInfo.IME_FLAG_NO_FULLSCREEN or
             EditorInfo.IME_FLAG_NO_PERSONALIZED_LEARNING
+        outAttrs.initialSelStart = 0
+        outAttrs.initialSelEnd = 0
+        outAttrs.initialCapsMode = 0
         return TerminalInputConnection()
     }
 
@@ -1310,6 +1315,7 @@ class TerminalView @JvmOverloads constructor(
         // that region with setComposingText(). Other compositions (for example pinyin pre-edit)
         // have not reached the terminal yet. Keep the two cases distinct.
         private var composingTextIsSent = false
+        private var extractedTextToken: Int? = null
 
         override fun beginBatchEdit(): Boolean {
             batchEditDepth++
@@ -1407,10 +1413,29 @@ class TerminalView @JvmOverloads constructor(
             return result
         }
 
+        override fun getExtractedText(request: ExtractedTextRequest?, flags: Int): ExtractedText {
+            if (flags and InputConnection.GET_EXTRACTED_TEXT_MONITOR != 0) {
+                extractedTextToken = request?.token
+            }
+            return currentExtractedText()
+        }
+
         override fun getCursorCapsMode(reqModes: Int): Int = 0
 
         override fun sendKeyEvent(event: KeyEvent): Boolean {
-            if (event.action != KeyEvent.ACTION_DOWN) return true
+            if (event.action != KeyEvent.ACTION_DOWN) {
+                this@TerminalView.dispatchKeyEvent(event)
+                if (event.action == KeyEvent.ACTION_UP &&
+                    (event.keyCode == KeyEvent.KEYCODE_DEL ||
+                        event.keyCode == KeyEvent.KEYCODE_FORWARD_DEL)
+                ) {
+                    // WeChat Input Method sends raw down/up events for backspace. Reporting the
+                    // selection during ACTION_DOWN races its own candidate update, so publish the
+                    // changed editor state only after the complete key gesture.
+                    post { scheduleImeStateUpdate() }
+                }
+                return true
+            }
 
             if (event.keyCode == KeyEvent.KEYCODE_ENTER ||
                 event.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
@@ -1471,14 +1496,8 @@ class TerminalView @JvmOverloads constructor(
         private fun mirrorKeyEventInEditable(event: KeyEvent) {
             when (event.keyCode) {
                 KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> resetEditableContext()
-                KeyEvent.KEYCODE_DEL -> {
-                    super.deleteSurroundingText(1, 0)
-                    scheduleImeStateUpdate()
-                }
-                KeyEvent.KEYCODE_FORWARD_DEL -> {
-                    super.deleteSurroundingText(0, 1)
-                    scheduleImeStateUpdate()
-                }
+                KeyEvent.KEYCODE_DEL -> super.deleteSurroundingText(1, 0)
+                KeyEvent.KEYCODE_FORWARD_DEL -> super.deleteSurroundingText(0, 1)
                 else -> {
                     val unicode = event.unicodeChar
                     if (unicode > 0 && !event.isCtrlPressed) {
@@ -1512,6 +1531,19 @@ class TerminalView @JvmOverloads constructor(
             else reportImeState()
         }
 
+        private fun currentExtractedText(): ExtractedText {
+            val content = editable
+            return ExtractedText().apply {
+                text = content?.toString().orEmpty()
+                startOffset = 0
+                partialStartOffset = -1
+                partialEndOffset = -1
+                selectionStart = content?.let(Selection::getSelectionStart)?.coerceAtLeast(0) ?: 0
+                selectionEnd = content?.let(Selection::getSelectionEnd)?.coerceAtLeast(0) ?: 0
+                flags = ExtractedText.FLAG_SINGLE_LINE
+            }
+        }
+
         private fun reportImeState() {
             imeStateUpdatePending = false
             val content = editable ?: return
@@ -1524,6 +1556,9 @@ class TerminalView @JvmOverloads constructor(
                 BaseInputConnection.getComposingSpanStart(content),
                 BaseInputConnection.getComposingSpanEnd(content)
             )
+            extractedTextToken?.let {
+                inputMethodManager.updateExtractedText(this@TerminalView, it, currentExtractedText())
+            }
         }
     }
 }
