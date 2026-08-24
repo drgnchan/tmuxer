@@ -1685,11 +1685,13 @@ private fun TerminalScreen(
                     TerminalView(context).apply {
                         terminalViewRef = this
                         this.terminalTheme = terminalTheme
-                        emulator = terminalViewModel.terminal
                         onInput = terminalViewModel::sendTerminalInput
                         onTerminalResize = terminalViewModel::resizeTerminal
                         onImageClick = openTerminalImage
                         onNotice = terminalViewModel::showNotice
+                        // Register resize delivery before assigning the emulator: some AndroidView
+                        // implementations already have non-zero bounds during factory creation.
+                        emulator = terminalViewModel.terminal
                     }
                 },
                 update = { view ->

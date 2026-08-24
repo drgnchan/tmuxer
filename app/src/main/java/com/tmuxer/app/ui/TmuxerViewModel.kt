@@ -64,6 +64,11 @@ sealed interface ConnectionRecoveryStatus {
     data object Restored : ConnectionRecoveryStatus
 }
 
+private data class PendingTerminalOpen(
+    val window: TmuxWindow,
+    val completeRecoveryOnConnect: Boolean
+)
+
 class TmuxerViewModel(application: Application) : AndroidViewModel(application) {
     private val profileStore = SecureProfileStore(application)
     private val restoreStore = ConnectionRestoreStore(application)
@@ -147,6 +152,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private var uploadJob: Job? = null
     private var terminalColumns = 80
     private var terminalRows = 24
+    private var terminalViewportReady = false
+    private var pendingTerminalOpen: PendingTerminalOpen? = null
 
     fun onAppForegrounded() {
         appInForeground = true
@@ -193,6 +200,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         _connection.value = ConnectionState.Connecting(profile)
         restore.terminalTarget?.let { target ->
             _selectedWindow.value = target.placeholder()
+            if (_screen.value != AppScreen.Terminal) terminalViewportReady = false
             _screen.value = AppScreen.Terminal
         } ?: run {
             _selectedWindow.value = null
@@ -227,7 +235,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 _screen.value = AppScreen.Terminal
                 restoreStore.saveTerminal(profile.id, window)
                 if (!sshManager.isTerminalConnected()) {
-                    openTerminal(window, completeRecoveryOnConnect = true)
+                    requestTerminalOpen(window, completeRecoveryOnConnect = true)
                 } else {
                     showRecoveryCompleteIfActive()
                 }
@@ -272,7 +280,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                         _selectedWindow.value = window
                         _screen.value = AppScreen.Terminal
                         restoreStore.saveTerminal(profile.id, window)
-                        openTerminal(window, completeRecoveryOnConnect = true)
+                        requestTerminalOpen(window, completeRecoveryOnConnect = true)
                     }
                 }
                 return
@@ -564,13 +572,32 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         cancelWarmTerminalClose()
         _selectedWindow.value = window
         currentProfile()?.let { restoreStore.saveTerminal(it.id, window) }
+        // The dashboard has no TerminalView, so its last grid can be stale after rotation, system
+        // inset changes, or an IME animation. Wait for the newly measured viewport before attaching
+        // tmux; otherwise a fullscreen TUI first renders at (for example) 80x24, loses its bottom
+        // input area during the local resize, and then visibly jumps through another remote redraw.
+        terminalViewportReady = false
         _screen.value = AppScreen.Terminal
         if (activeTerminalWindowId == window.windowId && sshManager.isTerminalConnected()) {
+            pendingTerminalOpen = null
             // Leaving for the dashboard keeps the channels warm briefly. Returning to the same
             // window can therefore reuse its terminal, cursor, scrollback and decoded image state.
             _terminalConnected.value = true
         } else {
-            openTerminal(window)
+            requestTerminalOpen(window)
+        }
+    }
+
+    private fun requestTerminalOpen(
+        window: TmuxWindow,
+        completeRecoveryOnConnect: Boolean = false
+    ) {
+        if (terminalViewportReady && _screen.value == AppScreen.Terminal) {
+            pendingTerminalOpen = null
+            openTerminal(window, completeRecoveryOnConnect)
+        } else {
+            pendingTerminalOpen = PendingTerminalOpen(window, completeRecoveryOnConnect)
+            _terminalConnected.value = false
         }
     }
 
@@ -687,7 +714,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 terminalGeneration++
                 activeTerminalWindowId = null
                 sshManager.closeTerminal()
-                openTerminal(window)
+                requestTerminalOpen(window)
             }
         } else {
             viewModelScope.launch {
@@ -829,11 +856,25 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun resizeTerminal(columns: Int, rows: Int) {
-        if (columns == terminalColumns && rows == terminalRows) return
+        val changed = columns != terminalColumns || rows != terminalRows
         terminalColumns = columns
         terminalRows = rows
-        imageTerminal.resize(columns, rows)
-        sshManager.resizeTerminal(columns, rows)
+        if (changed) imageTerminal.resize(columns, rows)
+
+        if (_screen.value != AppScreen.Terminal) {
+            terminalViewportReady = false
+            return
+        }
+        terminalViewportReady = true
+        val pending = pendingTerminalOpen
+        if (pending != null) {
+            pendingTerminalOpen = null
+            openTerminal(pending.window, pending.completeRecoveryOnConnect)
+        } else if (changed || sshManager.isTerminalConnected()) {
+            // Reassert the PTY size when reusing a warm channel even if the dimensions are equal.
+            // This gives fullscreen applications one deterministic redraw after returning.
+            sshManager.resizeTerminal(columns, rows)
+        }
     }
 
     fun leaveTerminal() {
@@ -841,6 +882,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         uploadJob = null
         _uploadProgress.value = null
         _ctrlActive.value = false
+        pendingTerminalOpen = null
+        terminalViewportReady = false
         _selectedWindow.value?.let {
             val profileId = currentProfile()?.id ?: return@let
             restoreStore.saveDashboard(profileId)
@@ -889,6 +932,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
         _terminalConnected.value = false
         _ctrlActive.value = false
+        pendingTerminalOpen = null
+        terminalViewportReady = false
         restoreStore.saveDashboard(profileId)
         _selectedWindow.value = null
         _screen.value = AppScreen.Windows(profileId)
@@ -921,6 +966,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         refreshJob?.cancel()
         terminalGeneration++
         activeTerminalWindowId = null
+        pendingTerminalOpen = null
+        terminalViewportReady = false
         imageCheckpoint = null
         imageStateProfileId = null
         imageStateWindowId = null
