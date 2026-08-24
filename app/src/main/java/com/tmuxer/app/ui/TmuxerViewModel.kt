@@ -58,6 +58,12 @@ data class FileUploadProgress(
         get() = totalBytes.takeIf { it > 0 }?.let { (bytesSent.toDouble() / it).coerceIn(0.0, 1.0).toFloat() }
 }
 
+sealed interface ConnectionRecoveryStatus {
+    data object Idle : ConnectionRecoveryStatus
+    data class Restoring(val message: String) : ConnectionRecoveryStatus
+    data object Restored : ConnectionRecoveryStatus
+}
+
 class TmuxerViewModel(application: Application) : AndroidViewModel(application) {
     private val profileStore = SecureProfileStore(application)
     private val restoreStore = ConnectionRestoreStore(application)
@@ -105,6 +111,10 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private val _notices = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val notices = _notices.asSharedFlow()
 
+    private val _connectionRecoveryStatus =
+        MutableStateFlow<ConnectionRecoveryStatus>(ConnectionRecoveryStatus.Idle)
+    val connectionRecoveryStatus = _connectionRecoveryStatus.asStateFlow()
+
     val terminal = TerminalEmulator(reply = { response ->
         sshManager.writeTerminal(response.toByteArray(Charsets.UTF_8))
     })
@@ -119,6 +129,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private var refreshJob: Job? = null
     private var connectJob: Job? = null
     private var recoveryJob: Job? = null
+    private var recoveryStatusClearJob: Job? = null
     @Volatile private var appInForeground = false
     @Volatile private var terminalGeneration = 0
     @Volatile private var imageCheckpoint: ImageStreamCheckpoint? = null
@@ -152,6 +163,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         applyTerminalTheme(profile.terminalTheme)
         if (_connection.value is ConnectionState.Disconnected || currentProfile()?.id != profile.id) {
             prepareRestoreUi(profile, restore)
+        } else if (restore.terminalTarget != null && !sshManager.isTerminalConnected()) {
+            _terminalConnected.value = false
+            showRecoveryInProgress()
         }
         recoveryJob = viewModelScope.launch {
             val healthy = sshManager.isConnectionHealthy()
@@ -179,6 +193,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
         _terminalConnected.value = false
         _dashboardMessage.value = "正在恢复连接…"
+        showRecoveryInProgress()
     }
 
     private suspend fun restoreHealthyConnection(
@@ -191,18 +206,24 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         val target = restore.terminalTarget
         if (target == null) {
             _screen.value = AppScreen.Windows(profile.id)
+            showRecoveryCompleteIfActive()
         } else {
             val window = resolveRestoredWindow(latest, target)
             if (window == null) {
                 _selectedWindow.value = null
                 _screen.value = AppScreen.Windows(profile.id)
                 restoreStore.saveDashboard(profile.id)
+                hideRecoveryStatus()
                 _notices.tryEmit("之前的 tmux 窗口已不存在")
             } else {
                 _selectedWindow.value = window
                 _screen.value = AppScreen.Terminal
                 restoreStore.saveTerminal(profile.id, window)
-                if (!sshManager.isTerminalConnected()) openTerminal(window)
+                if (!sshManager.isTerminalConnected()) {
+                    openTerminal(window, completeRecoveryOnConnect = true)
+                } else {
+                    showRecoveryCompleteIfActive()
+                }
             }
         }
         startAutoRefresh()
@@ -231,19 +252,20 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 if (target == null) {
                     _screen.value = AppScreen.Windows(profile.id)
                     restoreStore.saveDashboard(profile.id)
+                    showRecoveryCompleteIfActive()
                 } else {
                     val window = resolveRestoredWindow(latest, target)
                     if (window == null) {
                         _selectedWindow.value = null
                         _screen.value = AppScreen.Windows(profile.id)
                         restoreStore.saveDashboard(profile.id)
+                        hideRecoveryStatus()
                         _notices.tryEmit("已重连，但之前的 tmux 窗口已不存在")
                     } else {
                         _selectedWindow.value = window
                         _screen.value = AppScreen.Terminal
                         restoreStore.saveTerminal(profile.id, window)
-                        openTerminal(window)
-                        _notices.tryEmit("连接已自动恢复")
+                        openTerminal(window, completeRecoveryOnConnect = true)
                     }
                 }
                 return
@@ -252,7 +274,10 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 lastError = error
                 sshManager.disconnect()
                 if (attempt < retryDelays.size && appInForeground) {
-                    _dashboardMessage.value = "连接中断，正在自动重连（${attempt + 2}/${retryDelays.size + 1}）…"
+                    val retryMessage =
+                        "正在自动重连（${attempt + 2}/${retryDelays.size + 1}）…"
+                    _dashboardMessage.value = "连接中断，$retryMessage"
+                    showRecoveryInProgress(retryMessage)
                     delay(retryDelays[attempt])
                 } else {
                     break
@@ -261,6 +286,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
 
         _terminalConnected.value = false
+        hideRecoveryStatus()
         _connection.value = ConnectionState.Failed(profile, friendlyError(lastError))
         _dashboardMessage.value = friendlyError(lastError)
         _screen.value = AppScreen.Windows(profile.id)
@@ -298,6 +324,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun connect(profile: SshProfile) {
         cancelWarmTerminalClose()
+        hideRecoveryStatus()
         activeTerminalWindowId = null
         imageCheckpoint = null
         imageStateProfileId = null
@@ -447,7 +474,10 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    private fun openTerminal(window: TmuxWindow) {
+    private fun openTerminal(
+        window: TmuxWindow,
+        completeRecoveryOnConnect: Boolean = false
+    ) {
         cancelWarmTerminalClose()
         terminalGeneration++
         val generation = terminalGeneration
@@ -529,11 +559,15 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                         }
                     }
                 )
-                if (generation == terminalGeneration) _terminalConnected.value = true
+                if (generation == terminalGeneration) {
+                    _terminalConnected.value = true
+                    if (completeRecoveryOnConnect) showRecoveryCompleteIfActive()
+                }
             } catch (error: Throwable) {
                 if (generation == terminalGeneration) {
                     activeTerminalWindowId = null
                     _terminalConnected.value = false
+                    if (completeRecoveryOnConnect) hideRecoveryStatus()
                     _notices.tryEmit(friendlyError(error))
                 }
             }
@@ -774,6 +808,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         restoreStore.clear()
         recoveryJob?.cancel()
         recoveryJob = null
+        hideRecoveryStatus()
         connectJob?.cancel()
         refreshJob?.cancel()
         terminalGeneration++
@@ -798,6 +833,31 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             is AppScreen.Windows -> disconnectAndShowHosts()
             AppScreen.Terminal -> leaveTerminal()
         }
+    }
+
+    private fun showRecoveryInProgress(message: String = "正在恢复连接…") {
+        recoveryStatusClearJob?.cancel()
+        recoveryStatusClearJob = null
+        _connectionRecoveryStatus.value = ConnectionRecoveryStatus.Restoring(message)
+    }
+
+    private fun showRecoveryCompleteIfActive() {
+        if (_connectionRecoveryStatus.value !is ConnectionRecoveryStatus.Restoring) return
+        recoveryStatusClearJob?.cancel()
+        _connectionRecoveryStatus.value = ConnectionRecoveryStatus.Restored
+        recoveryStatusClearJob = viewModelScope.launch {
+            delay(RECOVERY_COMPLETE_VISIBLE_MILLIS)
+            if (_connectionRecoveryStatus.value is ConnectionRecoveryStatus.Restored) {
+                _connectionRecoveryStatus.value = ConnectionRecoveryStatus.Idle
+            }
+            recoveryStatusClearJob = null
+        }
+    }
+
+    private fun hideRecoveryStatus() {
+        recoveryStatusClearJob?.cancel()
+        recoveryStatusClearJob = null
+        _connectionRecoveryStatus.value = ConnectionRecoveryStatus.Idle
     }
 
     private fun isPiWindow(window: TmuxWindow?): Boolean =
@@ -857,6 +917,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     override fun onCleared() {
         cancelWarmTerminalClose()
+        recoveryStatusClearJob?.cancel()
         uploadJob?.cancel()
         sshManager.dispose()
         super.onCleared()
@@ -865,5 +926,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     companion object {
         private const val MAX_UPLOAD_FILES = 20
         private const val WARM_TERMINAL_REUSE_MILLIS = 30_000L
+        private const val RECOVERY_COMPLETE_VISIBLE_MILLIS = 1_600L
     }
 }

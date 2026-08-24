@@ -172,6 +172,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
     val terminalConnected by viewModel.terminalConnected.collectAsStateWithLifecycle()
     val ctrlActive by viewModel.ctrlActive.collectAsStateWithLifecycle()
     val terminalTheme by viewModel.terminalTheme.collectAsStateWithLifecycle()
+    val connectionRecoveryStatus by viewModel.connectionRecoveryStatus.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(viewModel) {
@@ -205,6 +206,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                 is AppScreen.Windows -> WindowDashboardScreen(
                     profile = profiles.firstOrNull { it.id == destination.profileId },
                     connection = connection,
+                    recovering = connectionRecoveryStatus is ConnectionRecoveryStatus.Restoring,
                     windows = windows,
                     recentPiDirectories = recentPiDirectories,
                     refreshing = refreshing,
@@ -220,6 +222,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     selected = selectedWindow,
                     windows = windows,
                     connected = terminalConnected,
+                    recovering = connectionRecoveryStatus is ConnectionRecoveryStatus.Restoring,
                     ctrlActive = ctrlActive,
                     terminalTheme = terminalTheme,
                     terminalViewModel = viewModel,
@@ -232,10 +235,67 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                 )
             }
         }
+        val visibleRecoveryStatus = when {
+            connectionRecoveryStatus is ConnectionRecoveryStatus.Restored -> connectionRecoveryStatus
+            screen == AppScreen.Terminal &&
+                connectionRecoveryStatus is ConnectionRecoveryStatus.Restoring -> connectionRecoveryStatus
+            else -> null
+        }
+        AnimatedContent(
+            targetState = visibleRecoveryStatus,
+            transitionSpec = {
+                fadeIn(tween(durationMillis = 140)) togetherWith
+                    fadeOut(tween(durationMillis = 120))
+            },
+            modifier = Modifier.align(Alignment.Center),
+            label = "connection recovery status"
+        ) { status ->
+            if (status != null) ConnectionRecoveryStatusPopup(status)
+        }
         SnackbarHost(
             hostState = snackbarHostState,
             modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp)
         )
+    }
+}
+
+@Composable
+private fun ConnectionRecoveryStatusPopup(status: ConnectionRecoveryStatus) {
+    val restored = status is ConnectionRecoveryStatus.Restored
+    val message = when (status) {
+        ConnectionRecoveryStatus.Idle -> return
+        is ConnectionRecoveryStatus.Restoring -> status.message
+        ConnectionRecoveryStatus.Restored -> "连接已自动恢复"
+    }
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = RaisedSurface.copy(alpha = 0.97f),
+        contentColor = TextPrimary,
+        border = BorderStroke(1.dp, if (restored) Mint.copy(alpha = 0.65f) else Outline),
+        shadowElevation = 8.dp,
+        modifier = Modifier.semantics { contentDescription = message }
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 20.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (restored) {
+                Icon(
+                    Icons.Rounded.CheckCircle,
+                    contentDescription = null,
+                    tint = Mint,
+                    modifier = Modifier.size(24.dp)
+                )
+            } else {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(22.dp),
+                    color = Mint,
+                    strokeWidth = 2.5.dp
+                )
+            }
+            Spacer(Modifier.width(11.dp))
+            Text(message, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.SemiBold)
+        }
     }
 }
 
@@ -728,6 +788,7 @@ private fun AppTextField(
 private fun WindowDashboardScreen(
     profile: SshProfile?,
     connection: ConnectionState,
+    recovering: Boolean,
     windows: List<TmuxWindow>,
     recentPiDirectories: List<String>,
     refreshing: Boolean,
@@ -800,7 +861,10 @@ private fun WindowDashboardScreen(
         }
     ) { padding ->
         when (connection) {
-            is ConnectionState.Connecting -> ConnectingDashboard(Modifier.fillMaxSize().padding(padding))
+            is ConnectionState.Connecting -> ConnectingDashboard(
+                recovering = recovering,
+                modifier = Modifier.fillMaxSize().padding(padding)
+            )
             is ConnectionState.Failed -> ConnectionError(
                 message = connection.message,
                 onRetry = onRetry,
@@ -946,7 +1010,10 @@ private fun WindowCard(window: TmuxWindow, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ConnectingDashboard(modifier: Modifier = Modifier) {
+private fun ConnectingDashboard(
+    recovering: Boolean,
+    modifier: Modifier = Modifier
+) {
     Column(
         modifier = modifier.padding(24.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -958,9 +1025,16 @@ private fun ConnectingDashboard(modifier: Modifier = Modifier) {
             }
         }
         Spacer(Modifier.height(24.dp))
-        Text("正在建立安全连接", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+        Text(
+            if (recovering) "正在恢复连接" else "正在建立安全连接",
+            style = MaterialTheme.typography.titleLarge,
+            fontWeight = FontWeight.Bold
+        )
         Spacer(Modifier.height(8.dp))
-        Text("连接 SSH 并读取 tmux 窗口…", color = TextSecondary)
+        Text(
+            if (recovering) "正在重连 SSH 并恢复 tmux 窗口…" else "连接 SSH 并读取 tmux 窗口…",
+            color = TextSecondary
+        )
     }
 }
 
@@ -1363,6 +1437,7 @@ private fun TerminalScreen(
     selected: TmuxWindow?,
     windows: List<TmuxWindow>,
     connected: Boolean,
+    recovering: Boolean,
     ctrlActive: Boolean,
     terminalTheme: TerminalTheme,
     terminalViewModel: TmuxerViewModel,
@@ -1575,7 +1650,7 @@ private fun TerminalScreen(
                     }
                 }
             }
-            if (!connected) {
+            if (!connected && !recovering) {
                 Surface(
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
                     color = RaisedSurface.copy(alpha = 0.92f),
