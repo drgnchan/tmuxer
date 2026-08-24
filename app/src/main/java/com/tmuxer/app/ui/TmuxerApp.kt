@@ -938,7 +938,7 @@ private fun WindowDashboardScreen(
                         groups.forEach { (_, sessionWindows) ->
                             val first = sessionWindows.first()
                             item(key = "header-${first.sessionId}") {
-                                SessionHeader(first.sessionName, sessionWindows.size)
+                                SessionHeader(first.sessionName)
                             }
                             items(sessionWindows, key = { it.windowId }) { window ->
                                 WindowCard(
@@ -969,15 +969,14 @@ private fun WindowDashboardScreen(
 }
 
 @Composable
-private fun SessionHeader(name: String, count: Int) {
+private fun SessionHeader(name: String) {
     Row(
         modifier = Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 2.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Icon(Icons.Rounded.Layers, null, tint = Mint, modifier = Modifier.size(17.dp))
         Spacer(Modifier.width(7.dp))
-        Text(name, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
-        Text("$count 个窗口", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+        Text(name, fontWeight = FontWeight.SemiBold)
     }
 }
 
@@ -1052,16 +1051,6 @@ private fun WindowCard(
                     }
                 }
                 Spacer(Modifier.width(8.dp))
-                Surface(color = RaisedSurface, shape = CircleShape) {
-                    Text(
-                        "${window.paneCount}P",
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.labelSmall,
-                        fontFamily = FontFamily.Monospace,
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 5.dp)
-                    )
-                }
-                Spacer(Modifier.width(4.dp))
                 Icon(Icons.Rounded.ChevronRight, null, tint = TextSecondary, modifier = Modifier.size(19.dp))
             }
             WindowPreviewFrame(
