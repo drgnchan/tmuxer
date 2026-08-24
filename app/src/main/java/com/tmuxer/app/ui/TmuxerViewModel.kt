@@ -149,6 +149,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private var imageStateWindowId: String? = null
     private var activeTerminalWindowId: String? = null
     private var warmTerminalCloseJob: Job? = null
+    private var terminalOpenSettleJob: Job? = null
     private var uploadJob: Job? = null
     private var terminalColumns = 80
     private var terminalRows = 24
@@ -578,12 +579,19 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         // input area during the local resize, and then visibly jumps through another remote redraw.
         terminalViewportReady = false
         _screen.value = AppScreen.Terminal
-        if (activeTerminalWindowId == window.windowId && sshManager.isTerminalConnected()) {
+        val warmChannelMatches =
+            activeTerminalWindowId == window.windowId && sshManager.isTerminalConnected()
+        if (warmChannelMatches && !isPiWindow(window)) {
             pendingTerminalOpen = null
-            // Leaving for the dashboard keeps the channels warm briefly. Returning to the same
-            // window can therefore reuse its terminal, cursor, scrollback and decoded image state.
+            // Shell windows can safely retain their terminal buffer for a near-instant return.
             _terminalConnected.value = true
         } else {
+            if (warmChannelMatches) {
+                // Pi fullscreen redraws only the regions it believes changed. Resizing its retained
+                // local buffer can therefore erase the composer until a later update. Ignore the
+                // warm reader now; the stable-size attach below will replay a complete screen.
+                terminalGeneration++
+            }
             requestTerminalOpen(window)
         }
     }
@@ -593,6 +601,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         completeRecoveryOnConnect: Boolean = false
     ) {
         if (terminalViewportReady && _screen.value == AppScreen.Terminal) {
+            terminalOpenSettleJob?.cancel()
+            terminalOpenSettleJob = null
             pendingTerminalOpen = null
             openTerminal(window, completeRecoveryOnConnect)
         } else {
@@ -601,11 +611,31 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    private fun schedulePendingTerminalOpen() {
+        val pending = pendingTerminalOpen ?: return
+        if (!terminalViewportReady || _screen.value != AppScreen.Terminal) return
+        terminalOpenSettleJob?.cancel()
+        terminalOpenSettleJob = viewModelScope.launch {
+            // Oppo/ColorOS can report another content height after the screen transition and inset
+            // dispatch. Attach only after that sequence settles so Pi sees one final PTY geometry.
+            delay(TERMINAL_VIEWPORT_SETTLE_MILLIS)
+            val shouldOpen = pendingTerminalOpen === pending && terminalViewportReady &&
+                _screen.value == AppScreen.Terminal
+            terminalOpenSettleJob = null
+            if (shouldOpen) {
+                pendingTerminalOpen = null
+                openTerminal(pending.window, pending.completeRecoveryOnConnect)
+            }
+        }
+    }
+
     private fun openTerminal(
         window: TmuxWindow,
         completeRecoveryOnConnect: Boolean = false
     ) {
         cancelWarmTerminalClose()
+        terminalOpenSettleJob?.cancel()
+        terminalOpenSettleJob = null
         terminalGeneration++
         val generation = terminalGeneration
         val profileId = currentProfile()?.id
@@ -866,10 +896,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         terminalViewportReady = true
-        val pending = pendingTerminalOpen
-        if (pending != null) {
-            pendingTerminalOpen = null
-            openTerminal(pending.window, pending.completeRecoveryOnConnect)
+        if (pendingTerminalOpen != null) {
+            schedulePendingTerminalOpen()
         } else if (changed || sshManager.isTerminalConnected()) {
             // Reassert the PTY size when reusing a warm channel even if the dimensions are equal.
             // This gives fullscreen applications one deterministic redraw after returning.
@@ -882,6 +910,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         uploadJob = null
         _uploadProgress.value = null
         _ctrlActive.value = false
+        terminalOpenSettleJob?.cancel()
+        terminalOpenSettleJob = null
         pendingTerminalOpen = null
         terminalViewportReady = false
         _selectedWindow.value?.let {
@@ -932,6 +962,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
         _terminalConnected.value = false
         _ctrlActive.value = false
+        terminalOpenSettleJob?.cancel()
+        terminalOpenSettleJob = null
         pendingTerminalOpen = null
         terminalViewportReady = false
         restoreStore.saveDashboard(profileId)
@@ -966,6 +998,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         refreshJob?.cancel()
         terminalGeneration++
         activeTerminalWindowId = null
+        terminalOpenSettleJob?.cancel()
+        terminalOpenSettleJob = null
         pendingTerminalOpen = null
         terminalViewportReady = false
         imageCheckpoint = null
@@ -1075,6 +1109,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         cancelWarmTerminalClose()
         recoveryStatusClearJob?.cancel()
         windowPreviewJob?.cancel()
+        terminalOpenSettleJob?.cancel()
         uploadJob?.cancel()
         sshManager.dispose()
         super.onCleared()
@@ -1084,6 +1119,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         private const val MAX_UPLOAD_FILES = 20
         private const val MAX_WINDOW_PREVIEW_BATCH = 12
         private const val WINDOW_PREVIEW_DEBOUNCE_MILLIS = 120L
+        private const val TERMINAL_VIEWPORT_SETTLE_MILLIS = 180L
         private const val WARM_TERMINAL_REUSE_MILLIS = 30_000L
         private const val RECOVERY_COMPLETE_VISIBLE_MILLIS = 1_600L
     }

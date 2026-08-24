@@ -1766,19 +1766,23 @@ private fun TerminalScreen(
                 }
             }
             if (!connected && !recovering) {
-                Surface(
-                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
-                    color = RaisedSurface.copy(alpha = 0.92f),
-                    shape = CircleShape,
-                    border = BorderStroke(1.dp, Outline)
+                Box(
+                    modifier = Modifier.fillMaxSize().background(Color(terminalTheme.backgroundColor)),
+                    contentAlignment = Alignment.Center
                 ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
+                    Surface(
+                        color = RaisedSurface.copy(alpha = 0.96f),
+                        shape = CircleShape,
+                        border = BorderStroke(1.dp, Outline)
                     ) {
-                        CircularProgressIndicator(Modifier.size(12.dp), color = Mint, strokeWidth = 1.5.dp)
-                        Spacer(Modifier.width(7.dp))
-                        Text("正在接入 tmux…", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        Row(
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            CircularProgressIndicator(Modifier.size(14.dp), color = Mint, strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("正在接入 tmux…", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
+                        }
                     }
                 }
             }
