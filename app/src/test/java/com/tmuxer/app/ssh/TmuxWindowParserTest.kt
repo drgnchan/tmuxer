@@ -60,40 +60,6 @@ class TmuxWindowParserTest {
     }
 
     @Test
-    fun parsesAnsiPaneCapturesAndReconstructsSplitWindowBounds() {
-        fun encoded(value: String) = java.util.Base64.getEncoder()
-            .encodeToString(value.toByteArray())
-        val output = listOf(
-            listOf("@7", "%12", "0", "0", "39", "24", "8", "12", "1", encoded("left\n")).joinToString("\t"),
-            listOf("@7", "%13", "40", "0", "40", "24", "2", "3", "0", encoded("right\n")).joinToString("\t"),
-            "not-a-record"
-        ).joinToString("\n")
-
-        val capture = parseWindowPreviewCaptures(output).single()
-
-        assertEquals("@7", capture.windowId)
-        assertEquals(80, capture.columns)
-        assertEquals(24, capture.rows)
-        assertEquals(2, capture.panes.size)
-        assertEquals("left\n", capture.panes.first().content.toString(Charsets.UTF_8))
-        assertEquals(12, capture.panes.first().cursorRow)
-        assertTrue(capture.panes.first().active)
-        assertFalse(capture.panes.last().active)
-    }
-
-    @Test
-    fun previewCommandIgnoresInvalidTargetsAndCapturesEveryPane() {
-        val command = buildWindowPreviewCommand(listOf("@7", "@7", "oops"))
-
-        assertTrue(command.contains("tmux list-panes -t '@7'"))
-        assertTrue(command.contains("#{pane_left}"))
-        assertTrue(command.contains("#{cursor_y}"))
-        assertTrue(command.contains("tmux capture-pane -p -e"))
-        assertEquals(1, "tmux list-panes".toRegex().findAll(command).count())
-        assertFalse(command.contains("oops"))
-    }
-
-    @Test
     fun acceptsOnlyGeneratedTerminalImagePaths() {
         val hash = "0123456789abcdef".repeat(4)
         assertTrue(

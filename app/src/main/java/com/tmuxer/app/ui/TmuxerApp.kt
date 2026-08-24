@@ -102,7 +102,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -110,10 +109,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
@@ -158,7 +155,6 @@ import com.tmuxer.app.ui.theme.TextSecondary
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -169,7 +165,6 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val connection by viewModel.connection.collectAsStateWithLifecycle()
     val windows by viewModel.windows.collectAsStateWithLifecycle()
-    val windowPreviews by viewModel.windowPreviews.collectAsStateWithLifecycle()
     val recentPiDirectories by viewModel.recentPiDirectories.collectAsStateWithLifecycle()
     val refreshing by viewModel.refreshing.collectAsStateWithLifecycle()
     val dashboardMessage by viewModel.dashboardMessage.collectAsStateWithLifecycle()
@@ -213,7 +208,6 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     connection = connection,
                     recovering = connectionRecoveryStatus is ConnectionRecoveryStatus.Restoring,
                     windows = windows,
-                    windowPreviews = windowPreviews,
                     recentPiDirectories = recentPiDirectories,
                     refreshing = refreshing,
                     dashboardMessage = dashboardMessage,
@@ -221,7 +215,6 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     onRefresh = viewModel::refreshWindows,
                     onRetry = viewModel::retryConnection,
                     onWindow = viewModel::openWindow,
-                    onVisibleWindowsChanged = viewModel::updateVisibleWindowPreviews,
                     onCreateSession = viewModel::createSession,
                     onListRemoteDirectories = viewModel::listRemoteDirectories
                 )
@@ -821,7 +814,6 @@ private fun WindowDashboardScreen(
     connection: ConnectionState,
     recovering: Boolean,
     windows: List<TmuxWindow>,
-    windowPreviews: Map<String, WindowPreviewUiState>,
     recentPiDirectories: List<String>,
     refreshing: Boolean,
     dashboardMessage: String?,
@@ -829,27 +821,13 @@ private fun WindowDashboardScreen(
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onWindow: (TmuxWindow) -> Unit,
-    onVisibleWindowsChanged: (Set<String>) -> Unit,
     onCreateSession: (String, Boolean, String) -> Unit,
     onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
     val groups = remember(windows) { windows.groupBy { it.sessionId } }
     val existingSessionNames = remember(windows) { windows.map { it.sessionName }.toSet() }
-    val windowIds = remember(windows) { windows.mapTo(linkedSetOf()) { it.windowId } }
-    val listState = rememberLazyListState()
     val connected = connection is ConnectionState.Connected
-
-    LaunchedEffect(listState, windowIds) {
-        snapshotFlow {
-            listState.layoutInfo.visibleItemsInfo.mapNotNullTo(linkedSetOf()) { item ->
-                (item.key as? String)?.takeIf(windowIds::contains)
-            }
-        }.distinctUntilChanged().collect(onVisibleWindowsChanged)
-    }
-    DisposableEffect(Unit) {
-        onDispose { onVisibleWindowsChanged(emptySet()) }
-    }
 
     Scaffold(
         containerColor = Ink,
@@ -924,7 +902,6 @@ private fun WindowDashboardScreen(
             )
             is ConnectionState.Connected -> {
                 LazyColumn(
-                    state = listState,
                     modifier = Modifier.fillMaxSize().padding(padding),
                     contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 12.dp, bottom = 108.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -941,11 +918,7 @@ private fun WindowDashboardScreen(
                                 SessionHeader(first.sessionName)
                             }
                             items(sessionWindows, key = { it.windowId }) { window ->
-                                WindowCard(
-                                    window = window,
-                                    previewState = windowPreviews[window.windowId],
-                                    onClick = { onWindow(window) }
-                                )
+                                WindowCard(window = window, onClick = { onWindow(window) })
                             }
                         }
                     }
@@ -981,11 +954,7 @@ private fun SessionHeader(name: String) {
 }
 
 @Composable
-private fun WindowCard(
-    window: TmuxWindow,
-    previewState: WindowPreviewUiState?,
-    onClick: () -> Unit
-) {
+private fun WindowCard(window: TmuxWindow, onClick: () -> Unit) {
     OutlinedCard(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
@@ -995,120 +964,62 @@ private fun WindowCard(
         ),
         border = BorderStroke(1.dp, if (window.active) Mint.copy(alpha = 0.7f) else Outline.copy(alpha = 0.75f))
     ) {
-        Column {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 13.dp, vertical = 11.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Surface(
-                    modifier = Modifier.size(38.dp),
-                    shape = RoundedCornerShape(11.dp),
-                    color = if (window.active) Mint else RaisedSurface,
-                    contentColor = if (window.active) Ink else TextPrimary
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Text(
-                            window.index.toString(),
-                            fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 15.sp
-                        )
-                    }
-                }
-                Spacer(Modifier.width(11.dp))
-                Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            window.name,
-                            style = MaterialTheme.typography.titleSmall,
-                            fontWeight = FontWeight.SemiBold,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f)
-                        )
-                        if (window.activity) {
-                            Box(Modifier.size(6.dp).background(Amber, CircleShape))
-                            Spacer(Modifier.width(7.dp))
-                        }
-                    }
-                    Spacer(Modifier.height(4.dp))
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            window.command.ifBlank { "shell" },
-                            color = TerminalBlue,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace
-                        )
-                        Text("  ·  ", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-                        Text(
-                            window.path,
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.labelSmall,
-                            fontFamily = FontFamily.Monospace,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-                Spacer(Modifier.width(8.dp))
-                Icon(Icons.Rounded.ChevronRight, null, tint = TextSecondary, modifier = Modifier.size(19.dp))
-            }
-            WindowPreviewFrame(
-                window = window,
-                state = previewState,
-                modifier = Modifier.fillMaxWidth().padding(start = 10.dp, end = 10.dp, bottom = 10.dp)
-            )
-        }
-    }
-}
-
-@Composable
-private fun WindowPreviewFrame(
-    window: TmuxWindow,
-    state: WindowPreviewUiState?,
-    modifier: Modifier = Modifier
-) {
-    Box(
-        modifier = modifier.height(112.dp)
-            .clip(RoundedCornerShape(10.dp))
-            .background(Color(0xFF07100D))
-            .semantics { contentDescription = "${window.name} 的终端预览" },
-        contentAlignment = Alignment.Center
-    ) {
-        when (state) {
-            is WindowPreviewUiState.Ready -> WindowTerminalPreviewCanvas(
-                preview = state.preview,
-                modifier = Modifier.fillMaxSize()
-            )
-            WindowPreviewUiState.Unavailable -> Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Icon(Icons.Rounded.VisibilityOff, null, tint = TextSecondary, modifier = Modifier.size(17.dp))
-                Text("终端预览暂不可用", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-            }
-            WindowPreviewUiState.Loading, null -> Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(9.dp)
-            ) {
-                CircularProgressIndicator(Modifier.size(15.dp), color = Mint, strokeWidth = 2.dp)
-                Text("正在读取终端…", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
-            }
-        }
-        Surface(
-            modifier = Modifier.align(Alignment.TopStart).padding(7.dp),
-            shape = CircleShape,
-            color = Color.Black.copy(alpha = 0.58f),
-            contentColor = Color.White
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 13.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
-            Row(
-                modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp),
-                verticalAlignment = Alignment.CenterVertically
+            Surface(
+                modifier = Modifier.size(38.dp),
+                shape = RoundedCornerShape(11.dp),
+                color = if (window.active) Mint else RaisedSurface,
+                contentColor = if (window.active) Ink else TextPrimary
             ) {
-                Box(Modifier.size(5.dp).background(if (window.active) Mint else TextSecondary, CircleShape))
-                Spacer(Modifier.width(5.dp))
-                Text("终端快照", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp)
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        window.index.toString(),
+                        fontFamily = FontFamily.Monospace,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 15.sp
+                    )
+                }
             }
+            Spacer(Modifier.width(11.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        window.name,
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (window.activity) {
+                        Box(Modifier.size(6.dp).background(Amber, CircleShape))
+                        Spacer(Modifier.width(7.dp))
+                    }
+                }
+                Spacer(Modifier.height(4.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        window.command.ifBlank { "shell" },
+                        color = TerminalBlue,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace
+                    )
+                    Text("  ·  ", color = TextSecondary, style = MaterialTheme.typography.labelSmall)
+                    Text(
+                        window.path,
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+            Spacer(Modifier.width(8.dp))
+            Icon(Icons.Rounded.ChevronRight, null, tint = TextSecondary, modifier = Modifier.size(19.dp))
         }
     }
 }
@@ -1685,13 +1596,11 @@ private fun TerminalScreen(
                     TerminalView(context).apply {
                         terminalViewRef = this
                         this.terminalTheme = terminalTheme
+                        emulator = terminalViewModel.terminal
                         onInput = terminalViewModel::sendTerminalInput
                         onTerminalResize = terminalViewModel::resizeTerminal
                         onImageClick = openTerminalImage
                         onNotice = terminalViewModel::showNotice
-                        // Register resize delivery before assigning the emulator: some AndroidView
-                        // implementations already have non-zero bounds during factory creation.
-                        emulator = terminalViewModel.terminal
                     }
                 },
                 update = { view ->
@@ -1766,23 +1675,19 @@ private fun TerminalScreen(
                 }
             }
             if (!connected && !recovering) {
-                Box(
-                    modifier = Modifier.fillMaxSize().background(Color(terminalTheme.backgroundColor)),
-                    contentAlignment = Alignment.Center
+                Surface(
+                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
+                    color = RaisedSurface.copy(alpha = 0.92f),
+                    shape = CircleShape,
+                    border = BorderStroke(1.dp, Outline)
                 ) {
-                    Surface(
-                        color = RaisedSurface.copy(alpha = 0.96f),
-                        shape = CircleShape,
-                        border = BorderStroke(1.dp, Outline)
+                    Row(
+                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 9.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            CircularProgressIndicator(Modifier.size(14.dp), color = Mint, strokeWidth = 2.dp)
-                            Spacer(Modifier.width(8.dp))
-                            Text("正在接入 tmux…", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
-                        }
+                        CircularProgressIndicator(Modifier.size(12.dp), color = Mint, strokeWidth = 1.5.dp)
+                        Spacer(Modifier.width(7.dp))
+                        Text("正在接入 tmux…", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
                     }
                 }
             }

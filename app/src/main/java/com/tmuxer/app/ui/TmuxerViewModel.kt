@@ -64,11 +64,6 @@ sealed interface ConnectionRecoveryStatus {
     data object Restored : ConnectionRecoveryStatus
 }
 
-private data class PendingTerminalOpen(
-    val window: TmuxWindow,
-    val completeRecoveryOnConnect: Boolean
-)
-
 class TmuxerViewModel(application: Application) : AndroidViewModel(application) {
     private val profileStore = SecureProfileStore(application)
     private val restoreStore = ConnectionRestoreStore(application)
@@ -86,10 +81,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _windows = MutableStateFlow<List<TmuxWindow>>(emptyList())
     val windows = _windows.asStateFlow()
-
-    private val _windowPreviews =
-        MutableStateFlow<Map<String, WindowPreviewUiState>>(emptyMap())
-    internal val windowPreviews = _windowPreviews.asStateFlow()
 
     private val _recentPiDirectories = MutableStateFlow(
         restoreStore.load()?.profileId?.let(recentPiDirectoryStore::load).orEmpty()
@@ -136,9 +127,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private var refreshJob: Job? = null
-    private var windowPreviewJob: Job? = null
-    private val requestedWindowPreviewIds = linkedSetOf<String>()
-    private var visibleWindowPreviewIds = emptySet<String>()
     private var connectJob: Job? = null
     private var recoveryJob: Job? = null
     private var recoveryStatusClearJob: Job? = null
@@ -149,12 +137,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private var imageStateWindowId: String? = null
     private var activeTerminalWindowId: String? = null
     private var warmTerminalCloseJob: Job? = null
-    private var terminalOpenSettleJob: Job? = null
     private var uploadJob: Job? = null
     private var terminalColumns = 80
     private var terminalRows = 24
-    private var terminalViewportReady = false
-    private var pendingTerminalOpen: PendingTerminalOpen? = null
 
     fun onAppForegrounded() {
         appInForeground = true
@@ -201,7 +186,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         _connection.value = ConnectionState.Connecting(profile)
         restore.terminalTarget?.let { target ->
             _selectedWindow.value = target.placeholder()
-            if (_screen.value != AppScreen.Terminal) terminalViewportReady = false
             _screen.value = AppScreen.Terminal
         } ?: run {
             _selectedWindow.value = null
@@ -217,7 +201,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         restore: ConnectionRestoreState
     ) {
         val latest = sshManager.listWindows()
-        applyWindowList(latest)
+        _windows.value = latest
         _dashboardMessage.value = null
         val target = restore.terminalTarget
         if (target == null) {
@@ -236,7 +220,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 _screen.value = AppScreen.Terminal
                 restoreStore.saveTerminal(profile.id, window)
                 if (!sshManager.isTerminalConnected()) {
-                    requestTerminalOpen(window, completeRecoveryOnConnect = true)
+                    openTerminal(window, completeRecoveryOnConnect = true)
                 } else {
                     showRecoveryCompleteIfActive()
                 }
@@ -260,7 +244,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 val info = sshManager.connect(profile)
                 val latest = sshManager.listWindows()
                 _connection.value = ConnectionState.Connected(info)
-                applyWindowList(latest)
+                _windows.value = latest
                 _dashboardMessage.value = null
                 startAutoRefresh()
 
@@ -281,7 +265,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                         _selectedWindow.value = window
                         _screen.value = AppScreen.Terminal
                         restoreStore.saveTerminal(profile.id, window)
-                        requestTerminalOpen(window, completeRecoveryOnConnect = true)
+                        openTerminal(window, completeRecoveryOnConnect = true)
                     }
                 }
                 return
@@ -355,8 +339,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         terminalGeneration++
         _screen.value = AppScreen.Windows(profile.id)
         _connection.value = ConnectionState.Connecting(profile)
-        resetWindowPreviews(clearVisibility = true)
-        applyWindowList(emptyList())
+        _windows.value = emptyList()
         _dashboardMessage.value = null
         _selectedWindow.value = null
 
@@ -408,8 +391,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private suspend fun refreshWindowsInternal() {
         try {
             val latest = sshManager.listWindows()
-            applyWindowList(latest)
-            requestWindowPreviews(visibleWindowPreviewIds, force = true)
+            _windows.value = latest
             _dashboardMessage.value = null
             _selectedWindow.value?.let { selected ->
                 _selectedWindow.value = latest.firstOrNull { it.windowId == selected.windowId } ?: selected
@@ -422,89 +404,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 refreshJob?.cancel()
             }
             if (appInForeground) ensureConnectionRestored()
-        }
-    }
-
-    fun updateVisibleWindowPreviews(windowIds: Set<String>) {
-        val currentIds = _windows.value.asSequence().map { it.windowId }.toSet()
-        visibleWindowPreviewIds = windowIds.intersect(currentIds)
-        requestWindowPreviews(visibleWindowPreviewIds, force = false)
-    }
-
-    private fun applyWindowList(latest: List<TmuxWindow>) {
-        _windows.value = latest
-        val currentIds = latest.asSequence().map { it.windowId }.toSet()
-        _windowPreviews.value = _windowPreviews.value.filterKeys(currentIds::contains)
-        visibleWindowPreviewIds = visibleWindowPreviewIds.intersect(currentIds)
-        requestedWindowPreviewIds.retainAll(currentIds)
-    }
-
-    private fun resetWindowPreviews(clearVisibility: Boolean) {
-        windowPreviewJob?.cancel()
-        windowPreviewJob = null
-        requestedWindowPreviewIds.clear()
-        _windowPreviews.value = emptyMap()
-        if (clearVisibility) visibleWindowPreviewIds = emptySet()
-    }
-
-    private fun requestWindowPreviews(windowIds: Set<String>, force: Boolean) {
-        if (_connection.value !is ConnectionState.Connected || _screen.value !is AppScreen.Windows) return
-        val currentIds = _windows.value.asSequence().map { it.windowId }.toSet()
-        val targets = windowIds.intersect(currentIds).filterTo(linkedSetOf()) { windowId ->
-            force || _windowPreviews.value[windowId] == null
-        }
-        if (targets.isEmpty()) return
-        requestedWindowPreviewIds += targets
-        if (windowPreviewJob?.isActive == true) return
-
-        windowPreviewJob = viewModelScope.launch {
-            try {
-                // Let LazyColumn settle so a quick fling is represented by one batched SSH call.
-                delay(WINDOW_PREVIEW_DEBOUNCE_MILLIS)
-                while (isActive && _connection.value is ConnectionState.Connected) {
-                    val availableIds = _windows.value.asSequence().map { it.windowId }.toSet()
-                    requestedWindowPreviewIds.retainAll(visibleWindowPreviewIds.intersect(availableIds))
-                    val batch = requestedWindowPreviewIds.take(MAX_WINDOW_PREVIEW_BATCH)
-                    if (batch.isEmpty()) break
-                    requestedWindowPreviewIds.removeAll(batch.toSet())
-
-                    val beforeCapture = _windowPreviews.value.toMutableMap()
-                    batch.forEach { windowId ->
-                        if (beforeCapture[windowId] !is WindowPreviewUiState.Ready) {
-                            beforeCapture[windowId] = WindowPreviewUiState.Loading
-                        }
-                    }
-                    _windowPreviews.value = beforeCapture
-
-                    try {
-                        val captures = sshManager.captureWindowPreviews(batch).associateBy { it.windowId }
-                        val theme = _terminalTheme.value
-                        val updated = _windowPreviews.value.toMutableMap()
-                        batch.forEach { windowId ->
-                            val capture = captures[windowId]
-                            updated[windowId] = if (capture == null) {
-                                WindowPreviewUiState.Unavailable
-                            } else {
-                                WindowPreviewUiState.Ready(
-                                    buildWindowTerminalPreview(capture, theme)
-                                )
-                            }
-                        }
-                        _windowPreviews.value = updated
-                    } catch (error: Throwable) {
-                        if (error is CancellationException) throw error
-                        val updated = _windowPreviews.value.toMutableMap()
-                        batch.forEach { windowId ->
-                            if (updated[windowId] !is WindowPreviewUiState.Ready) {
-                                updated[windowId] = WindowPreviewUiState.Unavailable
-                            }
-                        }
-                        _windowPreviews.value = updated
-                    }
-                }
-            } finally {
-                windowPreviewJob = null
-            }
         }
     }
 
@@ -539,7 +438,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 sshManager.createSession(safeName, launchPi, workingDirectory)
                 val latest = sshManager.listWindows()
-                applyWindowList(latest)
+                _windows.value = latest
                 _dashboardMessage.value = null
                 val createdWindow = latest.firstOrNull { it.sessionName == safeName }
                 if (launchPi) {
@@ -573,59 +472,13 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         cancelWarmTerminalClose()
         _selectedWindow.value = window
         currentProfile()?.let { restoreStore.saveTerminal(it.id, window) }
-        // The dashboard has no TerminalView, so its last grid can be stale after rotation, system
-        // inset changes, or an IME animation. Wait for the newly measured viewport before attaching
-        // tmux; otherwise a fullscreen TUI first renders at (for example) 80x24, loses its bottom
-        // input area during the local resize, and then visibly jumps through another remote redraw.
-        terminalViewportReady = false
         _screen.value = AppScreen.Terminal
-        val warmChannelMatches =
-            activeTerminalWindowId == window.windowId && sshManager.isTerminalConnected()
-        if (warmChannelMatches && !isPiWindow(window)) {
-            pendingTerminalOpen = null
-            // Shell windows can safely retain their terminal buffer for a near-instant return.
+        if (activeTerminalWindowId == window.windowId && sshManager.isTerminalConnected()) {
+            // Leaving for the dashboard keeps the channels warm briefly. Returning to the same
+            // window can therefore reuse its terminal, cursor, scrollback and decoded image state.
             _terminalConnected.value = true
         } else {
-            if (warmChannelMatches) {
-                // Pi fullscreen redraws only the regions it believes changed. Resizing its retained
-                // local buffer can therefore erase the composer until a later update. Ignore the
-                // warm reader now; the stable-size attach below will replay a complete screen.
-                terminalGeneration++
-            }
-            requestTerminalOpen(window)
-        }
-    }
-
-    private fun requestTerminalOpen(
-        window: TmuxWindow,
-        completeRecoveryOnConnect: Boolean = false
-    ) {
-        if (terminalViewportReady && _screen.value == AppScreen.Terminal) {
-            terminalOpenSettleJob?.cancel()
-            terminalOpenSettleJob = null
-            pendingTerminalOpen = null
-            openTerminal(window, completeRecoveryOnConnect)
-        } else {
-            pendingTerminalOpen = PendingTerminalOpen(window, completeRecoveryOnConnect)
-            _terminalConnected.value = false
-        }
-    }
-
-    private fun schedulePendingTerminalOpen() {
-        val pending = pendingTerminalOpen ?: return
-        if (!terminalViewportReady || _screen.value != AppScreen.Terminal) return
-        terminalOpenSettleJob?.cancel()
-        terminalOpenSettleJob = viewModelScope.launch {
-            // Oppo/ColorOS can report another content height after the screen transition and inset
-            // dispatch. Attach only after that sequence settles so Pi sees one final PTY geometry.
-            delay(TERMINAL_VIEWPORT_SETTLE_MILLIS)
-            val shouldOpen = pendingTerminalOpen === pending && terminalViewportReady &&
-                _screen.value == AppScreen.Terminal
-            terminalOpenSettleJob = null
-            if (shouldOpen) {
-                pendingTerminalOpen = null
-                openTerminal(pending.window, pending.completeRecoveryOnConnect)
-            }
+            openTerminal(window)
         }
     }
 
@@ -634,8 +487,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         completeRecoveryOnConnect: Boolean = false
     ) {
         cancelWarmTerminalClose()
-        terminalOpenSettleJob?.cancel()
-        terminalOpenSettleJob = null
         terminalGeneration++
         val generation = terminalGeneration
         val profileId = currentProfile()?.id
@@ -744,7 +595,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 terminalGeneration++
                 activeTerminalWindowId = null
                 sshManager.closeTerminal()
-                requestTerminalOpen(window)
+                openTerminal(window)
             }
         } else {
             viewModelScope.launch {
@@ -881,28 +732,14 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private fun applyTerminalTheme(theme: TerminalTheme) {
         _terminalTheme.value = theme
         terminal.setTheme(theme)
-        resetWindowPreviews(clearVisibility = false)
-        requestWindowPreviews(visibleWindowPreviewIds, force = true)
     }
 
     fun resizeTerminal(columns: Int, rows: Int) {
-        val changed = columns != terminalColumns || rows != terminalRows
+        if (columns == terminalColumns && rows == terminalRows) return
         terminalColumns = columns
         terminalRows = rows
-        if (changed) imageTerminal.resize(columns, rows)
-
-        if (_screen.value != AppScreen.Terminal) {
-            terminalViewportReady = false
-            return
-        }
-        terminalViewportReady = true
-        if (pendingTerminalOpen != null) {
-            schedulePendingTerminalOpen()
-        } else if (changed || sshManager.isTerminalConnected()) {
-            // Reassert the PTY size when reusing a warm channel even if the dimensions are equal.
-            // This gives fullscreen applications one deterministic redraw after returning.
-            sshManager.resizeTerminal(columns, rows)
-        }
+        imageTerminal.resize(columns, rows)
+        sshManager.resizeTerminal(columns, rows)
     }
 
     fun leaveTerminal() {
@@ -910,10 +747,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         uploadJob = null
         _uploadProgress.value = null
         _ctrlActive.value = false
-        terminalOpenSettleJob?.cancel()
-        terminalOpenSettleJob = null
-        pendingTerminalOpen = null
-        terminalViewportReady = false
         _selectedWindow.value?.let {
             val profileId = currentProfile()?.id ?: return@let
             restoreStore.saveDashboard(profileId)
@@ -962,10 +795,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
         _terminalConnected.value = false
         _ctrlActive.value = false
-        terminalOpenSettleJob?.cancel()
-        terminalOpenSettleJob = null
-        pendingTerminalOpen = null
-        terminalViewportReady = false
         restoreStore.saveDashboard(profileId)
         _selectedWindow.value = null
         _screen.value = AppScreen.Windows(profileId)
@@ -973,8 +802,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 sshManager.closeTerminal()
                 sshManager.terminateSession(window.sessionId)
-                applyWindowList(sshManager.listWindows())
-                requestWindowPreviews(visibleWindowPreviewIds, force = true)
+                _windows.value = sshManager.listWindows()
                 _dashboardMessage.value = null
                 _notices.tryEmit("tmux 会话 “${window.sessionName}” 已退出")
             } catch (error: Throwable) {
@@ -998,16 +826,11 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         refreshJob?.cancel()
         terminalGeneration++
         activeTerminalWindowId = null
-        terminalOpenSettleJob?.cancel()
-        terminalOpenSettleJob = null
-        pendingTerminalOpen = null
-        terminalViewportReady = false
         imageCheckpoint = null
         imageStateProfileId = null
         imageStateWindowId = null
         _connection.value = ConnectionState.Disconnected
-        resetWindowPreviews(clearVisibility = true)
-        applyWindowList(emptyList())
+        _windows.value = emptyList()
         _recentPiDirectories.value = emptyList()
         _selectedWindow.value = null
         _dashboardMessage.value = null
@@ -1108,8 +931,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     override fun onCleared() {
         cancelWarmTerminalClose()
         recoveryStatusClearJob?.cancel()
-        windowPreviewJob?.cancel()
-        terminalOpenSettleJob?.cancel()
         uploadJob?.cancel()
         sshManager.dispose()
         super.onCleared()
@@ -1117,9 +938,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private const val MAX_UPLOAD_FILES = 20
-        private const val MAX_WINDOW_PREVIEW_BATCH = 12
-        private const val WINDOW_PREVIEW_DEBOUNCE_MILLIS = 120L
-        private const val TERMINAL_VIEWPORT_SETTLE_MILLIS = 180L
         private const val WARM_TERMINAL_REUSE_MILLIS = 30_000L
         private const val RECOVERY_COMPLETE_VISIBLE_MILLIS = 1_600L
     }
