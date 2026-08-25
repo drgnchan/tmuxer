@@ -47,6 +47,21 @@ internal fun buildPiUploadInsertion(uploadedPaths: List<String>): String {
     return "$BRACKETED_PASTE_START$references$BRACKETED_PASTE_END"
 }
 
+internal fun nextWindowAfterSessionExit(
+    windows: List<TmuxWindow>,
+    exitingWindow: TmuxWindow
+): TmuxWindow? {
+    val exitingIndex = windows.indexOfFirst { it.windowId == exitingWindow.windowId }
+    if (exitingIndex < 0) return windows.firstOrNull { it.sessionId != exitingWindow.sessionId }
+
+    return windows.asSequence()
+        .drop(exitingIndex + 1)
+        .firstOrNull { it.sessionId != exitingWindow.sessionId }
+        ?: windows.take(exitingIndex)
+            .asReversed()
+            .firstOrNull { it.sessionId != exitingWindow.sessionId }
+}
+
 data class FileUploadProgress(
     val fileName: String,
     val fileIndex: Int,
@@ -786,6 +801,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
         val window = _selectedWindow.value ?: return
         val profileId = currentProfile()?.id ?: return
+        val preferredNextWindow = nextWindowAfterSessionExit(_windows.value, window)
         terminalGeneration++
         activeTerminalWindowId = null
         if (imageStateWindowId == window.windowId) {
@@ -795,20 +811,52 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
         _terminalConnected.value = false
         _ctrlActive.value = false
-        restoreStore.saveDashboard(profileId)
-        _selectedWindow.value = null
-        _screen.value = AppScreen.Windows(profileId)
         viewModelScope.launch {
             try {
                 sshManager.closeTerminal()
                 sshManager.terminateSession(window.sessionId)
-                _windows.value = sshManager.listWindows()
+                val latest = sshManager.listWindows()
+                _windows.value = latest
                 _dashboardMessage.value = null
+
+                val nextWindow = latest.firstOrNull {
+                    it.windowId == preferredNextWindow?.windowId
+                } ?: nextWindowAfterSessionExit(latest, window)
+                if (_screen.value == AppScreen.Terminal && nextWindow != null) {
+                    _selectedWindow.value = nextWindow
+                    restoreStore.saveTerminal(profileId, nextWindow)
+                    openTerminal(nextWindow)
+                } else {
+                    _selectedWindow.value = null
+                    restoreStore.saveDashboard(profileId)
+                    if (_screen.value == AppScreen.Terminal) {
+                        _screen.value = AppScreen.Windows(profileId)
+                    }
+                }
                 _notices.tryEmit("tmux 会话 “${window.sessionName}” 已退出")
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
                 _notices.tryEmit(friendlyError(error))
                 refreshWindowsInternal()
+
+                if (_screen.value == AppScreen.Terminal &&
+                    _connection.value is ConnectionState.Connected
+                ) {
+                    val recoveryWindow = _windows.value.firstOrNull {
+                        it.windowId == window.windowId
+                    } ?: _windows.value.firstOrNull {
+                        it.windowId == preferredNextWindow?.windowId
+                    } ?: nextWindowAfterSessionExit(_windows.value, window)
+                    if (recoveryWindow != null) {
+                        _selectedWindow.value = recoveryWindow
+                        restoreStore.saveTerminal(profileId, recoveryWindow)
+                        openTerminal(recoveryWindow)
+                    } else {
+                        _selectedWindow.value = null
+                        restoreStore.saveDashboard(profileId)
+                        _screen.value = AppScreen.Windows(profileId)
+                    }
+                }
             }
         }
     }
