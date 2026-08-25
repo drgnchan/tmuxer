@@ -11,8 +11,10 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.horizontalScroll
@@ -36,6 +38,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
@@ -107,6 +112,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -117,7 +123,11 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -153,10 +163,15 @@ import com.tmuxer.app.ui.theme.TerminalBlue
 import com.tmuxer.app.ui.theme.TextPrimary
 import com.tmuxer.app.ui.theme.TextSecondary
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+
+private const val DIRECTION_KEY_REPEAT_INTERVAL_MS = 65L
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1941,18 +1956,26 @@ private fun SpecialKeyBar(
                 KeyButton("Ctrl", description = "Control", active = ctrlActive, onClick = onControl)
                 KeyButton("Tab") { onKey("\t") }
             }
-            KeyButton(icon = Icons.Rounded.KeyboardArrowLeft, description = "左方向键") {
-                onKey("\u001B[D")
-            }
-            KeyButton(icon = Icons.Rounded.KeyboardArrowDown, description = "下方向键") {
-                onKey("\u001B[B")
-            }
-            KeyButton(icon = Icons.Rounded.KeyboardArrowUp, description = "上方向键") {
-                onKey("\u001B[A")
-            }
-            KeyButton(icon = Icons.Rounded.KeyboardArrowRight, description = "右方向键") {
-                onKey("\u001B[C")
-            }
+            KeyButton(
+                icon = Icons.Rounded.KeyboardArrowLeft,
+                description = "左方向键",
+                repeatOnLongPress = true
+            ) { onKey("\u001B[D") }
+            KeyButton(
+                icon = Icons.Rounded.KeyboardArrowDown,
+                description = "下方向键",
+                repeatOnLongPress = true
+            ) { onKey("\u001B[B") }
+            KeyButton(
+                icon = Icons.Rounded.KeyboardArrowUp,
+                description = "上方向键",
+                repeatOnLongPress = true
+            ) { onKey("\u001B[A") }
+            KeyButton(
+                icon = Icons.Rounded.KeyboardArrowRight,
+                description = "右方向键",
+                repeatOnLongPress = true
+            ) { onKey("\u001B[C") }
             if (piMode) {
                 KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowUp, description = "向上翻页") {
                     onKey("\u001B[5~")
@@ -1998,14 +2021,61 @@ private fun KeyButton(
     description: String = label.orEmpty(),
     active: Boolean = false,
     compact: Boolean = false,
+    repeatOnLongPress: Boolean = false,
     content: (@Composable () -> Unit)? = null,
     onClick: () -> Unit
 ) {
     require(label != null || icon != null || content != null) { "按键必须提供文字、图标或内容" }
+    val currentOnClick by rememberUpdatedState(onClick)
+    val interactionSource = remember { MutableInteractionSource() }
+    val inputModifier = if (repeatOnLongPress) {
+        Modifier
+            .semantics {
+                role = Role.Button
+                onClick {
+                    currentOnClick()
+                    true
+                }
+            }
+            .indication(interactionSource, LocalIndication.current)
+            .pointerInput(interactionSource) {
+                detectTapGestures(
+                    onPress = { position ->
+                        val press = PressInteraction.Press(position)
+                        interactionSource.emit(press)
+                        var repeated = false
+                        val released = coroutineScope {
+                            val repeatJob = launch {
+                                delay(viewConfiguration.longPressTimeoutMillis)
+                                while (isActive) {
+                                    repeated = true
+                                    currentOnClick()
+                                    delay(DIRECTION_KEY_REPEAT_INTERVAL_MS)
+                                }
+                            }
+                            val didRelease = tryAwaitRelease()
+                            repeatJob.cancelAndJoin()
+                            didRelease
+                        }
+                        interactionSource.emit(
+                            if (released) PressInteraction.Release(press)
+                            else PressInteraction.Cancel(press)
+                        )
+                        if (released && !repeated) currentOnClick()
+                    }
+                )
+            }
+    } else {
+        Modifier.clickable(
+            interactionSource = interactionSource,
+            indication = LocalIndication.current,
+            onClick = currentOnClick
+        )
+    }
     Surface(
         modifier = Modifier.height(30.dp).widthIn(min = if (compact) 34.dp else 40.dp)
             .semantics { contentDescription = description }
-            .clickable(onClick = onClick),
+            .then(inputModifier),
         shape = RoundedCornerShape(8.dp),
         color = if (active) Mint else RaisedSurface,
         contentColor = if (active) Ink else TextPrimary,
