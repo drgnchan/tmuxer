@@ -1224,12 +1224,15 @@ private fun CreateSessionDialog(
                             fontWeight = FontWeight.SemiBold
                         )
                         Spacer(Modifier.height(7.dp))
-                        LazyRow(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().heightIn(max = 224.dp),
+                            verticalArrangement = Arrangement.spacedBy(7.dp)
+                        ) {
                             items(recentPiDirectories, key = { it }) { path ->
                                 val selectedPath = workingDirectory.trim().trimEnd('/').ifEmpty { "/" }
                                 val selected = path == selectedPath
                                 Surface(
-                                    modifier = Modifier.widthIn(max = 250.dp).clickable {
+                                    modifier = Modifier.fillMaxWidth().clickable {
                                         workingDirectory = path
                                     },
                                     color = if (selected) Mint.copy(alpha = 0.14f) else DeepSurface,
