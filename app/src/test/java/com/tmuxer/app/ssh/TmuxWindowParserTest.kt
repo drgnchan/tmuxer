@@ -19,6 +19,15 @@ class TmuxWindowParserTest {
     }
 
     @Test
+    fun piDiscoveryFallsBackToTheUsersInteractiveLoginShell() {
+        val command = buildPiExecutableCheckCommand()
+
+        assertTrue(command.contains("\"\${SHELL:-/bin/sh}\" -lic 'command -v pi 2>/dev/null'"))
+        assertTrue(command.contains("tail -n 1"))
+        assertTrue(command.contains("[ ! -x \"\$PI_BIN\" ]"))
+    }
+
+    @Test
     fun piSessionCapturesInitialWindowIdWithoutAssumingBaseIndex() {
         val command = buildTmuxNewSessionCommand(
             sessionName = "team's work",

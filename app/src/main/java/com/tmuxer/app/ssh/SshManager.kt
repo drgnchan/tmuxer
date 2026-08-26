@@ -220,14 +220,7 @@ class SshManager(context: Context) {
     ) = withContext(Dispatchers.IO) {
         val safeName = name.trim()
         require(safeName.isNotEmpty()) { "会话名不能为空" }
-        val piCheck = if (launchPi) {
-            "PI_BIN=\$(command -v pi 2>/dev/null || true); " +
-                "if [ -z \"\$PI_BIN\" ] && [ -x \"\$HOME/.local/share/pi-node/current/bin/pi\" ]; " +
-                "then PI_BIN=\"\$HOME/.local/share/pi-node/current/bin/pi\"; fi; " +
-                "if [ -z \"\$PI_BIN\" ]; then printf '__TMUXER_PI_MISSING__\\n'; exit 127; fi; "
-        } else {
-            ""
-        }
+        val piCheck = if (launchPi) buildPiExecutableCheckCommand() else ""
         val requestedDirectory = workingDirectory.trim()
         val directorySetup = if (launchPi && requestedDirectory.isNotEmpty()) {
             "START_DIR=${shellQuote(requestedDirectory)}; " +
@@ -789,6 +782,16 @@ internal fun withRemoteExecutablePath(command: String): String =
         "\$HOME/.asdf/shims:\$HOME/.nix-profile/bin:/opt/homebrew/bin:/usr/local/bin:" +
         "/opt/local/bin:/home/linuxbrew/.linuxbrew/bin:/run/current-system/sw/bin:" +
         "/nix/var/nix/profiles/default/bin\"; $command"
+
+internal fun buildPiExecutableCheckCommand(): String =
+    "PI_BIN=\$(command -v pi 2>/dev/null || true); " +
+        "if [ -z \"\$PI_BIN\" ] && [ -x \"\$HOME/.local/share/pi-node/current/bin/pi\" ]; " +
+        "then PI_BIN=\"\$HOME/.local/share/pi-node/current/bin/pi\"; fi; " +
+        // Version managers such as nvm are commonly initialized only by interactive shell files.
+        "if [ -z \"\$PI_BIN\" ]; then " +
+        "PI_BIN=\$(\"\${SHELL:-/bin/sh}\" -lic 'command -v pi 2>/dev/null' " +
+        "2>/dev/null | tail -n 1); fi; " +
+        "if [ ! -x \"\$PI_BIN\" ]; then printf '__TMUXER_PI_MISSING__\\n'; exit 127; fi; "
 
 internal fun buildTmuxNewSessionCommand(
     sessionName: String,
