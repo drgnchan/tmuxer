@@ -8,6 +8,17 @@ import org.junit.Test
 
 class TmuxWindowParserTest {
     @Test
+    fun remoteCommandsIncludeCommonNonLoginShellExecutablePaths() {
+        val command = withRemoteExecutablePath("command -v tmux")
+
+        assertTrue(command.startsWith("export PATH=\"\$PATH:"))
+        assertTrue(command.contains("\$HOME/.local/bin"))
+        assertTrue(command.contains("/opt/homebrew/bin"))
+        assertTrue(command.contains("\$HOME/.nix-profile/bin"))
+        assertTrue(command.endsWith("; command -v tmux"))
+    }
+
+    @Test
     fun piSessionCapturesInitialWindowIdWithoutAssumingBaseIndex() {
         val command = buildTmuxNewSessionCommand(
             sessionName = "team's work",

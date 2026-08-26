@@ -479,11 +479,13 @@ class SshManager(context: Context) {
         channel.setPtyType("xterm-256color")
         channel.setPtySize(columns.coerceAtLeast(20), rows.coerceAtLeast(5), 0, 0)
         channel.setCommand(
-            // tmux marks clients without a UTF-8 locale as legacy and replaces CJK/emoji with
-            // underscores even though the session stores Unicode correctly.
-            "export LANG=C.UTF-8 LC_ALL=C.UTF-8; " +
-                "tmux select-window -t ${shellQuote(windowId)} && " +
-                "exec tmux attach-session -t ${shellQuote(sessionId)}"
+            withRemoteExecutablePath(
+                // tmux marks clients without a UTF-8 locale as legacy and replaces CJK/emoji with
+                // underscores even though the session stores Unicode correctly.
+                "export LANG=C.UTF-8 LC_ALL=C.UTF-8; " +
+                    "tmux select-window -t ${shellQuote(windowId)} && " +
+                    "exec tmux attach-session -t ${shellQuote(sessionId)}"
+            )
         )
         val input = channel.inputStream
         val output = channel.outputStream
@@ -561,7 +563,9 @@ class SshManager(context: Context) {
         }
 
         val channel = requireSession().openChannel("exec") as ChannelExec
-        channel.setCommand("tail -c +${plan.firstByte} -F -- ${shellQuote(path)}")
+        channel.setCommand(
+            withRemoteExecutablePath("tail -c +${plan.firstByte} -F -- ${shellQuote(path)}")
+        )
         channel.setInputStream(null)
         channel.setErrStream(ByteArrayOutputStream())
         val input = channel.inputStream
@@ -669,7 +673,7 @@ class SshManager(context: Context) {
     private fun execute(command: String, timeoutMillis: Long = 15_000): CommandResult {
         val channel = requireSession().openChannel("exec") as ChannelExec
         val error = ByteArrayOutputStream()
-        channel.setCommand(command)
+        channel.setCommand(withRemoteExecutablePath(command))
         channel.setInputStream(null)
         channel.setErrStream(error)
         val input = channel.inputStream
@@ -777,6 +781,14 @@ class SshManager(context: Context) {
 
     private data class CommandResult(val output: String, val error: String, val exitCode: Int)
 }
+
+// SSH exec channels are non-login shells, so macOS Homebrew, Nix and user-local tools may be
+// absent from PATH even though the same command works in an interactive terminal.
+internal fun withRemoteExecutablePath(command: String): String =
+    "export PATH=\"\$PATH:\$HOME/.local/bin:\$HOME/bin:\$HOME/.local/share/mise/shims:" +
+        "\$HOME/.asdf/shims:\$HOME/.nix-profile/bin:/opt/homebrew/bin:/usr/local/bin:" +
+        "/opt/local/bin:/home/linuxbrew/.linuxbrew/bin:/run/current-system/sw/bin:" +
+        "/nix/var/nix/profiles/default/bin\"; $command"
 
 internal fun buildTmuxNewSessionCommand(
     sessionName: String,
