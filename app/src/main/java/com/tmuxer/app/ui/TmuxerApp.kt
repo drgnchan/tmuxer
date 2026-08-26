@@ -135,6 +135,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -236,6 +237,12 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                 AppScreen.Terminal -> TerminalScreen(
                     selected = selectedWindow,
                     windows = windows,
+                    host = when (val state = connection) {
+                        is ConnectionState.Connecting -> state.profile.host
+                        is ConnectionState.Connected -> state.info.profile.host
+                        is ConnectionState.Failed -> state.profile.host
+                        ConnectionState.Disconnected -> ""
+                    },
                     connected = terminalConnected,
                     recovering = connectionRecoveryStatus is ConnectionRecoveryStatus.Restoring,
                     ctrlActive = ctrlActive,
@@ -1481,6 +1488,7 @@ private fun SessionModeButton(
 private fun TerminalScreen(
     selected: TmuxWindow?,
     windows: List<TmuxWindow>,
+    host: String,
     connected: Boolean,
     recovering: Boolean,
     ctrlActive: Boolean,
@@ -1539,7 +1547,16 @@ private fun TerminalScreen(
             verticalAlignment = Alignment.CenterVertically
         ) {
             TerminalBackButton(connected = connected, onClick = onBack)
-            Spacer(Modifier.weight(1f))
+            Text(
+                text = host,
+                modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                color = TextSecondary,
+                style = MaterialTheme.typography.labelMedium,
+                fontFamily = FontFamily.Monospace,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center
+            )
             IconButton(onClick = onToggleTheme, modifier = Modifier.size(44.dp)) {
                 Icon(
                     if (terminalTheme == TerminalTheme.DARK) Icons.Rounded.LightMode else Icons.Rounded.DarkMode,
