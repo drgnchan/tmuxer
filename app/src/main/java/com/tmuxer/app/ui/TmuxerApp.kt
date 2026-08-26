@@ -237,12 +237,12 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                 AppScreen.Terminal -> TerminalScreen(
                     selected = selectedWindow,
                     windows = windows,
-                    host = when (val state = connection) {
-                        is ConnectionState.Connecting -> state.profile.host
-                        is ConnectionState.Connected -> state.info.profile.host
-                        is ConnectionState.Failed -> state.profile.host
-                        ConnectionState.Disconnected -> ""
-                    },
+                    hostLabel = when (val state = connection) {
+                        is ConnectionState.Connecting -> state.profile
+                        is ConnectionState.Connected -> state.info.profile
+                        is ConnectionState.Failed -> state.profile
+                        ConnectionState.Disconnected -> null
+                    }?.let { profile -> profile.name.ifBlank { profile.host } }.orEmpty(),
                     connected = terminalConnected,
                     recovering = connectionRecoveryStatus is ConnectionRecoveryStatus.Restoring,
                     ctrlActive = ctrlActive,
@@ -1488,7 +1488,7 @@ private fun SessionModeButton(
 private fun TerminalScreen(
     selected: TmuxWindow?,
     windows: List<TmuxWindow>,
-    host: String,
+    hostLabel: String,
     connected: Boolean,
     recovering: Boolean,
     ctrlActive: Boolean,
@@ -1548,7 +1548,7 @@ private fun TerminalScreen(
         ) {
             TerminalBackButton(connected = connected, onClick = onBack)
             Text(
-                text = host,
+                text = hostLabel,
                 modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
                 color = TextSecondary,
                 style = MaterialTheme.typography.labelMedium,
