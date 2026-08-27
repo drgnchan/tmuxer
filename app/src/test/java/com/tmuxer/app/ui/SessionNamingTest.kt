@@ -5,6 +5,20 @@ import org.junit.Test
 
 class SessionNamingTest {
     @Test
+    fun blankShellNameUsesAvailableWorkspaceName() {
+        assertEquals("workspace", resolveShellSessionName("", emptySet()))
+        assertEquals(
+            "workspace-4",
+            resolveShellSessionName("", setOf("workspace", "workspace-2", "workspace-3"))
+        )
+    }
+
+    @Test
+    fun customShellNameIsPreservedAndTrimmed() {
+        assertEquals("remote shell", resolveShellSessionName("  remote shell  ", emptySet()))
+    }
+
+    @Test
     fun usesWorkingDirectoryLeafWhenNameIsBlank() {
         assertEquals(
             "tmuxer",

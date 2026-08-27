@@ -3,6 +3,15 @@ package com.tmuxer.app.ui
 private const val MAX_SESSION_NAME_LENGTH = 40
 private val UNSAFE_SESSION_NAME_CHARACTERS = Regex("[^\\p{L}\\p{N}_-]+")
 
+internal fun resolveShellSessionName(
+    requestedName: String,
+    existingSessionNames: Collection<String>
+): String {
+    val requested = requestedName.trim()
+    if (requested.isNotEmpty()) return requested
+    return nextAvailableSessionName("workspace", existingSessionNames)
+}
+
 internal fun resolvePiSessionName(
     requestedName: String,
     workingDirectory: String,

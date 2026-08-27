@@ -449,7 +449,10 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                         existingSessionNames = _windows.value.map { it.sessionName }
                     )
                 } else {
-                    name.trim()
+                    resolveShellSessionName(
+                        requestedName = name,
+                        existingSessionNames = _windows.value.map { it.sessionName }
+                    )
                 }
                 sshManager.createSession(safeName, launchPi, workingDirectory)
                 val latest = sshManager.listWindows()

@@ -1161,11 +1161,18 @@ private fun CreateSessionDialog(
     var mode by remember { mutableStateOf(SessionLaunchMode.SHELL) }
     var workingDirectory by rememberSaveable { mutableStateOf("~") }
     var showDirectoryPicker by remember { mutableStateOf(false) }
-    val resolvedPiSessionName = resolvePiSessionName(
-        requestedName = name,
-        workingDirectory = workingDirectory,
-        existingSessionNames = existingSessionNames
-    )
+    val resolvedSessionName = if (mode == SessionLaunchMode.PI) {
+        resolvePiSessionName(
+            requestedName = name,
+            workingDirectory = workingDirectory,
+            existingSessionNames = existingSessionNames
+        )
+    } else {
+        resolveShellSessionName(
+            requestedName = name,
+            existingSessionNames = existingSessionNames
+        )
+    }
     AlertDialog(
         onDismissRequest = onDismiss,
         icon = {
@@ -1212,16 +1219,16 @@ private fun CreateSessionDialog(
                 AppTextField(
                     value = name,
                     onValueChange = { name = it.replace(' ', '-').take(40) },
-                    label = if (mode == SessionLaunchMode.PI) "会话名称（可选）" else "会话名称",
-                    placeholder = if (mode == SessionLaunchMode.PI) "自动：$resolvedPiSessionName" else "workspace"
+                    label = "会话名称（可选）",
+                    placeholder = "自动：$resolvedSessionName"
+                )
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    "将使用会话名称：$resolvedSessionName",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelSmall
                 )
                 if (mode == SessionLaunchMode.PI) {
-                    Spacer(Modifier.height(5.dp))
-                    Text(
-                        "将使用会话名称：$resolvedPiSessionName",
-                        color = TextSecondary,
-                        style = MaterialTheme.typography.labelSmall
-                    )
                     Spacer(Modifier.height(10.dp))
                     AppTextField(
                         value = workingDirectory,
@@ -1309,15 +1316,12 @@ private fun CreateSessionDialog(
         confirmButton = {
             TextButton(
                 onClick = {
-                    if (mode == SessionLaunchMode.PI || name.isNotBlank()) {
-                        onCreate(
-                            name,
-                            mode == SessionLaunchMode.PI,
-                            workingDirectory.takeIf { mode == SessionLaunchMode.PI }?.trim().orEmpty()
-                        )
-                    }
-                },
-                enabled = mode == SessionLaunchMode.PI || name.isNotBlank()
+                    onCreate(
+                        name,
+                        mode == SessionLaunchMode.PI,
+                        workingDirectory.takeIf { mode == SessionLaunchMode.PI }?.trim().orEmpty()
+                    )
+                }
             ) {
                 Text(if (mode == SessionLaunchMode.PI) "启动 Pi" else "创建")
             }
