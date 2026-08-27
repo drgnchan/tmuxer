@@ -1,6 +1,9 @@
 package com.tmuxer.app.ui
 
 import android.app.Application
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.Uri
 import android.provider.OpenableColumns
 import com.jcraft.jsch.JSchException
@@ -132,7 +135,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     val terminal = TerminalEmulator(reply = { response ->
         sshManager.writeTerminal(response.toByteArray(Charsets.UTF_8))
-    })
+    }).apply {
+        onClipboardCopy = ::copyTerminalTextToClipboard
+    }
     // New Pi panes put OSC 8 image links directly in tmux's main output. Keep the shadow graphics
     // parser only for workspaces created by older tmuxer versions that still expose a side stream.
     private val imageTerminal = TerminalEmulator(
@@ -696,6 +701,15 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun showNotice(message: String) {
         if (message.isNotBlank()) _notices.tryEmit(message)
+    }
+
+    private fun copyTerminalTextToClipboard(text: String) {
+        viewModelScope.launch {
+            val clipboard = getApplication<Application>()
+                .getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+            clipboard.setPrimaryClip(ClipData.newPlainText("终端文本", text))
+            _notices.tryEmit("已复制到剪贴板")
+        }
     }
 
     fun sendTerminalInput(text: String) {

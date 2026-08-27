@@ -126,6 +126,7 @@ class TerminalEmulator(
 
     private var parserState = ParserState.NORMAL
     private val sequence = StringBuilder()
+    private var oscSequenceOverflow = false
     private var charsetSequencePending = false
     private var pendingCharsetSlot = 0
     private var g0LineDrawing = false
@@ -146,6 +147,9 @@ class TerminalEmulator(
 
     @Volatile
     var onChanged: (() -> Unit)? = null
+
+    @Volatile
+    var onClipboardCopy: ((String) -> Unit)? = null
 
     private val cells: Array<TerminalCell>
         get() = if (useAlternate) alternateCells else mainCells
@@ -220,6 +224,7 @@ class TerminalEmulator(
             wrapPending = false
             resetStyle()
             parserState = ParserState.NORMAL
+            oscSequenceOverflow = false
             charsetSequencePending = false
             pendingCharsetSlot = 0
             g0LineDrawing = false
@@ -395,20 +400,17 @@ class TerminalEmulator(
             ParserState.CSI -> processCsi(char)
             ParserState.OSC -> {
                 when (char) {
-                    '\u0007' -> {
-                        processOsc(sequence.toString())
-                        sequence.clear()
-                        parserState = ParserState.NORMAL
-                    }
+                    '\u0007' -> finishOsc()
                     '\u001B' -> parserState = ParserState.OSC_ESCAPE
-                    else -> if (sequence.length < 1024) sequence.append(char)
+                    else -> {
+                        if (sequence.length < MAX_OSC_SEQUENCE_CHARS) sequence.append(char)
+                        else oscSequenceOverflow = true
+                    }
                 }
             }
             ParserState.OSC_ESCAPE -> {
                 if (char == '\\') {
-                    processOsc(sequence.toString())
-                    sequence.clear()
-                    parserState = ParserState.NORMAL
+                    finishOsc()
                 } else {
                     parserState = ParserState.OSC
                 }
@@ -497,6 +499,7 @@ class TerminalEmulator(
             }
             ']' -> {
                 sequence.clear()
+                oscSequenceOverflow = false
                 parserState = ParserState.OSC
             }
             '_' -> {
@@ -626,10 +629,28 @@ class TerminalEmulator(
         if (command !in charArrayOf('m', 'h', 'l')) wrapPending = false
     }
 
+    private fun finishOsc() {
+        if (!oscSequenceOverflow) processOsc(sequence.toString())
+        sequence.clear()
+        oscSequenceOverflow = false
+        parserState = ParserState.NORMAL
+    }
+
     private fun processOsc(raw: String) {
-        if (!raw.startsWith("8;")) return
         val parts = raw.split(';', limit = 3)
-        if (parts.size == 3) activeHyperlink = parts[2].takeIf { it.isNotEmpty() }
+        if (parts.size != 3) return
+        when (parts[0]) {
+            "8" -> activeHyperlink = parts[2].takeIf { it.isNotEmpty() }
+            "52" -> decodeOsc52Clipboard(parts[1], parts[2])?.let { onClipboardCopy?.invoke(it) }
+        }
+    }
+
+    private fun decodeOsc52Clipboard(selection: String, payload: String): String? {
+        if (selection.isEmpty() || selection.any { it !in "cpsq01234567" }) return null
+        if (payload == "?" || payload.length > MAX_OSC52_BASE64_CHARS) return null
+        val decoded = runCatching { Base64.getDecoder().decode(payload) }.getOrNull() ?: return null
+        if (decoded.size > MAX_OSC52_CLIPBOARD_BYTES) return null
+        return decoded.toString(Charsets.UTF_8)
     }
 
     private fun processKittyGraphics(raw: String) {
@@ -1235,6 +1256,9 @@ class TerminalEmulator(
 
     companion object {
         private const val MAX_SCROLLBACK_LINES = 2_000
+        private const val MAX_OSC_SEQUENCE_CHARS = 128 * 1024
+        private const val MAX_OSC52_BASE64_CHARS = 100_000
+        private const val MAX_OSC52_CLIPBOARD_BYTES = 75_000
         private const val MAX_KITTY_CHUNK_CHARS = 8 * 1024
         private const val MAX_KITTY_BASE64_CHARS = 24 * 1024 * 1024
         private const val MAX_KITTY_IMAGE_BYTES = 18 * 1024 * 1024

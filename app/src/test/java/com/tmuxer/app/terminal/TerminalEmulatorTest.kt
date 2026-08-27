@@ -43,6 +43,37 @@ class TerminalEmulatorTest {
     }
 
     @Test
+    fun copiesLongOsc52TextToAndroidClipboardSink() {
+        val copied = mutableListOf<String>()
+        val terminal = TerminalEmulator(20, 5).apply {
+            onClipboardCopy = copied::add
+        }
+        val text = "Pi 原始回复\n" + "long line ".repeat(300)
+        val payload = java.util.Base64.getEncoder().encodeToString(text.toByteArray())
+
+        terminal.feed("\u001B]52;c;$payload\u0007".toByteArray())
+
+        assertEquals(listOf(text), copied)
+    }
+
+    @Test
+    fun acceptsOsc52StringTerminatorSplitAcrossPackets() {
+        val copied = mutableListOf<String>()
+        val terminal = TerminalEmulator(20, 5).apply {
+            onClipboardCopy = copied::add
+        }
+        val text = "line one\nline two"
+        val payload = java.util.Base64.getEncoder().encodeToString(text.toByteArray())
+        val sequence = "\u001B]52;c;$payload\u001B\\".toByteArray()
+
+        terminal.feed(sequence.copyOfRange(0, sequence.size - 1))
+        assertTrue(copied.isEmpty())
+        terminal.feed(sequence.copyOfRange(sequence.size - 1, sequence.size))
+
+        assertEquals(listOf(text), copied)
+    }
+
+    @Test
     fun reportsOneRowImageLinkGeometryToPi() {
         val replies = mutableListOf<String>()
         val terminal = TerminalEmulator(20, 5, reply = replies::add)

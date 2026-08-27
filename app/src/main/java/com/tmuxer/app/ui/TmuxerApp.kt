@@ -1959,6 +1959,7 @@ private fun SpecialKeyBar(
                 KeyButton("Esc", description = "停止生成", compact = true) { onKey("\u001B") }
                 KeyButton("/", description = "输入斜杠命令", compact = true) { onKey("/") }
                 KeyButton("^D", description = "删除字符或退出", compact = true) { onKey("\u0004") }
+                KeyButton("^X", description = "复制上一条 Pi 回复", compact = true) { onKey("\u0018") }
                 KeyButton("^U", description = "清空输入", compact = true) { onKey("\u0015") }
                 KeyButton("^J", description = "插入换行", compact = true) { onKey("\u000A") }
                 CtrlShiftDirectionButton(
