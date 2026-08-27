@@ -232,6 +232,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     onRetry = viewModel::retryConnection,
                     onWindow = viewModel::openWindow,
                     onCreateSession = viewModel::createSession,
+                    onRemoveRecentPiDirectory = viewModel::removeRecentPiDirectory,
                     onListRemoteDirectories = viewModel::listRemoteDirectories
                 )
                 AppScreen.Terminal -> TerminalScreen(
@@ -844,6 +845,7 @@ private fun WindowDashboardScreen(
     onRetry: () -> Unit,
     onWindow: (TmuxWindow) -> Unit,
     onCreateSession: (String, Boolean, String) -> Unit,
+    onRemoveRecentPiDirectory: (String) -> Unit,
     onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
@@ -958,6 +960,7 @@ private fun WindowDashboardScreen(
                 showCreateDialog = false
                 onCreateSession(name, launchPi, workingDirectory)
             },
+            onRemoveRecentPiDirectory = onRemoveRecentPiDirectory,
             onListRemoteDirectories = onListRemoteDirectories
         )
     }
@@ -1151,6 +1154,7 @@ private fun CreateSessionDialog(
     existingSessionNames: Set<String>,
     onDismiss: () -> Unit,
     onCreate: (String, Boolean, String) -> Unit,
+    onRemoveRecentPiDirectory: (String) -> Unit,
     onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
 ) {
     var name by rememberSaveable { mutableStateOf("") }
@@ -1280,8 +1284,20 @@ private fun CreateSessionDialog(
                                             maxLines = 1,
                                             overflow = TextOverflow.Ellipsis,
                                             fontFamily = FontFamily.Monospace,
-                                            style = MaterialTheme.typography.labelMedium
+                                            style = MaterialTheme.typography.labelMedium,
+                                            modifier = Modifier.weight(1f)
                                         )
+                                        IconButton(
+                                            onClick = { onRemoveRecentPiDirectory(path) },
+                                            modifier = Modifier.size(32.dp)
+                                        ) {
+                                            Icon(
+                                                Icons.Rounded.Delete,
+                                                "删除打开记录：$path",
+                                                tint = TextSecondary,
+                                                modifier = Modifier.size(17.dp)
+                                            )
+                                        }
                                     }
                                 }
                             }

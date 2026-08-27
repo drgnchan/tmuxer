@@ -28,9 +28,24 @@ class RecentPiDirectoryStore(context: Context) {
     @Synchronized
     fun record(profileId: String, directory: String): List<String> {
         val updated = updateRecentPiDirectories(load(profileId), directory)
-        val array = JSONArray().apply { updated.forEach(::put) }
-        preferences.edit().putString(profileId, array.toString()).apply()
+        save(profileId, updated)
         return updated
+    }
+
+    @Synchronized
+    fun remove(profileId: String, directory: String): List<String> {
+        val updated = removeRecentPiDirectory(load(profileId), directory)
+        save(profileId, updated)
+        return updated
+    }
+
+    private fun save(profileId: String, directories: List<String>) {
+        if (directories.isEmpty()) {
+            preferences.edit().remove(profileId).apply()
+        } else {
+            val array = JSONArray().apply { directories.forEach(::put) }
+            preferences.edit().putString(profileId, array.toString()).apply()
+        }
     }
 
     fun removeProfile(profileId: String) {
@@ -60,6 +75,14 @@ internal fun updateRecentPiDirectories(
             if (size == limit) return@buildList
         }
     }
+}
+
+internal fun removeRecentPiDirectory(
+    existing: List<String>,
+    directory: String
+): List<String> {
+    val removed = normalizePiDirectory(directory) ?: return existing
+    return existing.filterNot { normalizePiDirectory(it) == removed }
 }
 
 private fun normalizePiDirectory(directory: String): String? {

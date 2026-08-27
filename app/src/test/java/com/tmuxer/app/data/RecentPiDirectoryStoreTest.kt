@@ -40,4 +40,23 @@ class RecentPiDirectoryStoreTest {
             updateRecentPiDirectories(listOf("/one", "/two"), "   ")
         )
     }
+
+    @Test
+    fun removesOnlyTheSelectedRecentDirectory() {
+        assertEquals(
+            listOf("/one", "/three"),
+            removeRecentPiDirectory(
+                existing = listOf("/one", "/two", "/three"),
+                directory = "/two/"
+            )
+        )
+    }
+
+    @Test
+    fun blankRemovalDoesNotChangeExistingDirectories() {
+        assertEquals(
+            listOf("/one", "/two"),
+            removeRecentPiDirectory(listOf("/one", "/two"), "   ")
+        )
+    }
 }

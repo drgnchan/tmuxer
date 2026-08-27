@@ -477,6 +477,11 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    fun removeRecentPiDirectory(directory: String) {
+        val profileId = currentProfile()?.id ?: return
+        _recentPiDirectories.value = recentPiDirectoryStore.remove(profileId, directory)
+    }
+
     suspend fun listRemoteDirectories(path: String): RemoteDirectoryListing =
         sshManager.listRemoteDirectories(path)
 
