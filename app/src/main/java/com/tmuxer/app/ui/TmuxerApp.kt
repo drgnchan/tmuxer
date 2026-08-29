@@ -1996,7 +1996,7 @@ private fun SpecialKeyBar(
                 KeyButton("Shift", active = shiftActive, onClick = onShift)
                 KeyButton("Alt", active = altActive, onClick = onAlt)
                 KeyButton("Tab") { onKey("\t") }
-                KeyButton("⇧Tab", description = "Shift+Tab") { onKey("\u001B[Z") }
+                ShiftTabButton { onKey("\u001B[Z") }
                 KeyButton("/", description = "输入斜杠") { onKey("/") }
                 KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowUp, description = "向上翻页") {
                     onKey("\u001B[5~")
@@ -2016,7 +2016,7 @@ private fun SpecialKeyBar(
                 KeyButton("Shift", active = shiftActive, onClick = onShift)
                 KeyButton("Alt", active = altActive, onClick = onAlt)
                 KeyButton("Tab") { onKey("\t") }
-                KeyButton("⇧Tab", description = "Shift+Tab") { onKey("\u001B[Z") }
+                ShiftTabButton { onKey("\u001B[Z") }
             }
             KeyButton(
                 icon = Icons.Rounded.KeyboardArrowLeft,
@@ -2050,6 +2050,25 @@ private fun SpecialKeyBar(
             KeyButton("|") { onKey("|") }
         }
     }
+}
+
+@Composable
+private fun ShiftTabButton(onClick: () -> Unit) {
+    KeyButton(
+        description = "Shift+Tab",
+        content = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(ShiftFilledIcon, contentDescription = null, modifier = Modifier.size(11.dp))
+                Spacer(Modifier.width(3.dp))
+                Text(
+                    "Tab",
+                    fontFamily = FontFamily.Monospace,
+                    style = MaterialTheme.typography.labelSmall
+                )
+            }
+        },
+        onClick = onClick
+    )
 }
 
 @Composable
