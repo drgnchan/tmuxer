@@ -42,6 +42,94 @@ import java.net.UnknownHostException
 
 private const val BRACKETED_PASTE_START = "\u001B[200~"
 private const val BRACKETED_PASTE_END = "\u001B[201~"
+private const val ESCAPE = "\u001B"
+
+internal data class TerminalModifiers(
+    val control: Boolean = false,
+    val shift: Boolean = false,
+    val alt: Boolean = false
+) {
+    val active: Boolean
+        get() = control || shift || alt
+
+    val xtermParameter: Int
+        get() = 1 + (if (shift) 1 else 0) + (if (alt) 2 else 0) + (if (control) 4 else 0)
+}
+
+internal fun applyTerminalInputModifiers(text: String, modifiers: TerminalModifiers): String {
+    if (text.isEmpty() || !modifiers.active) return text
+
+    val shiftedFirst = if (modifiers.shift) shiftedTerminalCharacter(text.first()) else text.first()
+    val modifiedFirst = if (modifiers.control) {
+        when (shiftedFirst) {
+            '?' -> 0x7F.toChar()
+            ' ' -> 0.toChar()
+            else -> (shiftedFirst.uppercaseChar().code and 0x1F).toChar()
+        }
+    } else {
+        shiftedFirst
+    }
+    val modified = modifiedFirst + text.drop(1)
+    return if (modifiers.alt) ESCAPE + modified else modified
+}
+
+internal fun applyTerminalSpecialKeyModifiers(
+    sequence: String,
+    modifiers: TerminalModifiers
+): String {
+    if (!modifiers.active) return sequence
+
+    val modifiedSequence = when (sequence) {
+        "\t" -> when {
+            modifiers.control -> "$ESCAPE[9;${modifiers.xtermParameter}u"
+            modifiers.shift -> ESCAPE + "[Z"
+            else -> "\t"
+        }
+        "$ESCAPE[D" -> "$ESCAPE[1;${modifiers.xtermParameter}D"
+        "$ESCAPE[B" -> "$ESCAPE[1;${modifiers.xtermParameter}B"
+        "$ESCAPE[A" -> "$ESCAPE[1;${modifiers.xtermParameter}A"
+        "$ESCAPE[C" -> "$ESCAPE[1;${modifiers.xtermParameter}C"
+        "$ESCAPE[5~" -> "$ESCAPE[5;${modifiers.xtermParameter}~"
+        "$ESCAPE[6~" -> "$ESCAPE[6;${modifiers.xtermParameter}~"
+        else -> if (sequence.length == 1 && sequence.first() >= ' ') {
+            return applyTerminalInputModifiers(sequence, modifiers)
+        } else {
+            return sequence
+        }
+    }
+    // Alt is already represented by the xterm modifier parameter for CSI sequences. Legacy Tab
+    // has no parameterized form, so prefix it with Escape in the conventional terminal encoding.
+    return if (modifiers.alt && sequence == "\t" && !modifiers.control) {
+        ESCAPE + modifiedSequence
+    } else {
+        modifiedSequence
+    }
+}
+
+private fun shiftedTerminalCharacter(character: Char): Char = when (character) {
+    '1' -> '!'
+    '2' -> '@'
+    '3' -> '#'
+    '4' -> '$'
+    '5' -> '%'
+    '6' -> '^'
+    '7' -> '&'
+    '8' -> '*'
+    '9' -> '('
+    '0' -> ')'
+    '-' -> '_'
+    '=' -> '+'
+    '[' -> '{'
+    ']' -> '}'
+    '\\' -> '|'
+    ';' -> ':'
+    '\'' -> '"'
+    ',' -> '<'
+    '.' -> '>'
+    '/' -> '?'
+    '`' -> '~'
+    else -> character.uppercaseChar()
+}
 
 internal fun buildPiUploadInsertion(uploadedPaths: List<String>): String {
     val references = uploadedPaths.joinToString(separator = " ", postfix = " ") { "@$it" }
@@ -119,6 +207,12 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _ctrlActive = MutableStateFlow(false)
     val ctrlActive = _ctrlActive.asStateFlow()
+
+    private val _shiftActive = MutableStateFlow(false)
+    val shiftActive = _shiftActive.asStateFlow()
+
+    private val _altActive = MutableStateFlow(false)
+    val altActive = _altActive.asStateFlow()
 
     private val _terminalTheme = MutableStateFlow(TerminalTheme.DARK)
     val terminalTheme = _terminalTheme.asStateFlow()
@@ -679,7 +773,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     uploadedPaths += uploaded.remotePath
                 }
-                _ctrlActive.value = false
+                clearModifiers()
                 val insertion = if (isPiWindow(selected)) {
                     buildPiUploadInsertion(uploadedPaths)
                 } else {
@@ -714,28 +808,43 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun sendTerminalInput(text: String) {
         if (text.isEmpty()) return
-        val bytes = if (_ctrlActive.value) {
-            _ctrlActive.value = false
-            val first = text.first()
-            val control = when (first) {
-                '?' -> 0x7F.toChar()
-                ' ' -> 0.toChar()
-                else -> (first.uppercaseChar().code and 0x1F).toChar()
-            }
-            (control + text.drop(1)).toByteArray(Charsets.UTF_8)
-        } else {
-            text.toByteArray(Charsets.UTF_8)
-        }
-        sshManager.writeTerminal(bytes)
+        val modifiers = consumeModifiers()
+        val modified = applyTerminalInputModifiers(text, modifiers)
+        sshManager.writeTerminal(modified.toByteArray(Charsets.UTF_8))
     }
 
     fun sendSpecialKey(sequence: String) {
-        _ctrlActive.value = false
-        sshManager.writeTerminal(sequence.toByteArray(Charsets.UTF_8))
+        val modifiers = consumeModifiers()
+        val modified = applyTerminalSpecialKeyModifiers(sequence, modifiers)
+        sshManager.writeTerminal(modified.toByteArray(Charsets.UTF_8))
     }
 
     fun toggleControl() {
         _ctrlActive.value = !_ctrlActive.value
+    }
+
+    fun toggleShift() {
+        _shiftActive.value = !_shiftActive.value
+    }
+
+    fun toggleAlt() {
+        _altActive.value = !_altActive.value
+    }
+
+    private fun consumeModifiers(): TerminalModifiers {
+        val modifiers = TerminalModifiers(
+            control = _ctrlActive.value,
+            shift = _shiftActive.value,
+            alt = _altActive.value
+        )
+        clearModifiers()
+        return modifiers
+    }
+
+    private fun clearModifiers() {
+        _ctrlActive.value = false
+        _shiftActive.value = false
+        _altActive.value = false
     }
 
     fun toggleTerminalTheme() {
@@ -783,7 +892,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         uploadJob?.cancel()
         uploadJob = null
         _uploadProgress.value = null
-        _ctrlActive.value = false
+        clearModifiers()
         _selectedWindow.value?.let {
             val profileId = currentProfile()?.id ?: return@let
             restoreStore.saveDashboard(profileId)
@@ -832,7 +941,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             imageStateWindowId = null
         }
         _terminalConnected.value = false
-        _ctrlActive.value = false
+        clearModifiers()
         viewModelScope.launch {
             try {
                 sshManager.closeTerminal()

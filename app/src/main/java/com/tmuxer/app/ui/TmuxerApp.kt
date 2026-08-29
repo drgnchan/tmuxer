@@ -187,6 +187,8 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
     val selectedWindow by viewModel.selectedWindow.collectAsStateWithLifecycle()
     val terminalConnected by viewModel.terminalConnected.collectAsStateWithLifecycle()
     val ctrlActive by viewModel.ctrlActive.collectAsStateWithLifecycle()
+    val shiftActive by viewModel.shiftActive.collectAsStateWithLifecycle()
+    val altActive by viewModel.altActive.collectAsStateWithLifecycle()
     val terminalTheme by viewModel.terminalTheme.collectAsStateWithLifecycle()
     val connectionRecoveryStatus by viewModel.connectionRecoveryStatus.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -247,12 +249,16 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     connected = terminalConnected,
                     recovering = connectionRecoveryStatus is ConnectionRecoveryStatus.Restoring,
                     ctrlActive = ctrlActive,
+                    shiftActive = shiftActive,
+                    altActive = altActive,
                     terminalTheme = terminalTheme,
                     terminalViewModel = viewModel,
                     onBack = viewModel::leaveTerminal,
                     onExitSession = viewModel::terminateTmuxSession,
                     onSwitchWindow = viewModel::switchWindow,
                     onControl = viewModel::toggleControl,
+                    onShift = viewModel::toggleShift,
+                    onAlt = viewModel::toggleAlt,
                     onToggleTheme = viewModel::toggleTerminalTheme,
                     onSpecialKey = viewModel::sendSpecialKey
                 )
@@ -1512,12 +1518,16 @@ private fun TerminalScreen(
     connected: Boolean,
     recovering: Boolean,
     ctrlActive: Boolean,
+    shiftActive: Boolean,
+    altActive: Boolean,
     terminalTheme: TerminalTheme,
     terminalViewModel: TmuxerViewModel,
     onBack: () -> Unit,
     onExitSession: () -> Unit,
     onSwitchWindow: (TmuxWindow) -> Unit,
     onControl: () -> Unit,
+    onShift: () -> Unit,
+    onAlt: () -> Unit,
     onToggleTheme: () -> Unit,
     onSpecialKey: (String) -> Unit
 ) {
@@ -1751,7 +1761,11 @@ private fun TerminalScreen(
         SpecialKeyBar(
             piMode = selected?.let { it.command == "pi" || it.name.equals("pi", true) } == true,
             ctrlActive = ctrlActive,
+            shiftActive = shiftActive,
+            altActive = altActive,
             onControl = onControl,
+            onShift = onShift,
+            onAlt = onAlt,
             onKey = onSpecialKey
         )
     }
@@ -1938,7 +1952,11 @@ private fun WindowTab(
 private fun SpecialKeyBar(
     piMode: Boolean,
     ctrlActive: Boolean,
+    shiftActive: Boolean,
+    altActive: Boolean,
     onControl: () -> Unit,
+    onShift: () -> Unit,
+    onAlt: () -> Unit,
     onKey: (String) -> Unit
 ) {
     val firstRowScroll = rememberScrollState()
@@ -1975,7 +1993,10 @@ private fun SpecialKeyBar(
             } else {
                 KeyButton("Esc", description = "Escape") { onKey("\u001B") }
                 KeyButton("Ctrl", description = "Control", active = ctrlActive, onClick = onControl)
+                KeyButton("Shift", active = shiftActive, onClick = onShift)
+                KeyButton("Alt", active = altActive, onClick = onAlt)
                 KeyButton("Tab") { onKey("\t") }
+                KeyButton("⇧Tab", description = "Shift+Tab") { onKey("\u001B[Z") }
                 KeyButton("/", description = "输入斜杠") { onKey("/") }
                 KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowUp, description = "向上翻页") {
                     onKey("\u001B[5~")
@@ -1992,7 +2013,10 @@ private fun SpecialKeyBar(
         ) {
             if (piMode) {
                 KeyButton("Ctrl", description = "Control", active = ctrlActive, onClick = onControl)
+                KeyButton("Shift", active = shiftActive, onClick = onShift)
+                KeyButton("Alt", active = altActive, onClick = onAlt)
                 KeyButton("Tab") { onKey("\t") }
+                KeyButton("⇧Tab", description = "Shift+Tab") { onKey("\u001B[Z") }
             }
             KeyButton(
                 icon = Icons.Rounded.KeyboardArrowLeft,
