@@ -1636,23 +1636,6 @@ private fun TerminalScreen(
             }
         }
 
-        if (windows.isNotEmpty()) {
-            LazyRow(
-                state = tabListState,
-                modifier = Modifier.fillMaxWidth().background(RaisedSurface),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                items(windows, key = { it.windowId }) { window ->
-                    WindowTab(
-                        window = window,
-                        selected = selected?.windowId == window.windowId,
-                        onClick = { onSwitchWindow(window) }
-                    )
-                }
-            }
-        }
-
         Box(
             Modifier.weight(1f).fillMaxWidth().background(Color(terminalTheme.backgroundColor))
         ) {
@@ -1754,6 +1737,23 @@ private fun TerminalScreen(
                         Spacer(Modifier.width(7.dp))
                         Text("正在接入 tmux…", style = MaterialTheme.typography.labelSmall, color = TextSecondary)
                     }
+                }
+            }
+        }
+
+        if (windows.isNotEmpty()) {
+            LazyRow(
+                state = tabListState,
+                modifier = Modifier.fillMaxWidth().background(RaisedSurface),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                items(windows, key = { it.windowId }) { window ->
+                    WindowTab(
+                        window = window,
+                        selected = selected?.windowId == window.windowId,
+                        onClick = { onSwitchWindow(window) }
+                    )
                 }
             }
         }
