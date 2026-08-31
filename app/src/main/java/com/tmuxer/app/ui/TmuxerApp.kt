@@ -1295,7 +1295,7 @@ private fun CreateSessionDialog(
                                         Text(
                                             path,
                                             maxLines = 1,
-                                            overflow = TextOverflow.Ellipsis,
+                                            overflow = TextOverflow.StartEllipsis,
                                             fontFamily = FontFamily.Monospace,
                                             style = MaterialTheme.typography.labelMedium,
                                             modifier = Modifier.weight(1f)
