@@ -107,6 +107,7 @@ class TerminalEmulator(
     private var viewportOffset = 0
     private var mouseTracking = false
     private var sgrMouseProtocol = false
+    private var bracketedPasteMode = false
 
     private var cursorColumn = 0
     private var cursorRow = 0
@@ -214,6 +215,7 @@ class TerminalEmulator(
             viewportOffset = 0
             mouseTracking = false
             sgrMouseProtocol = false
+            bracketedPasteMode = false
             cursorColumn = 0
             cursorRow = 0
             savedColumn = 0
@@ -353,6 +355,9 @@ class TerminalEmulator(
 
     @Synchronized
     fun isMouseTrackingActive(): Boolean = mouseTracking
+
+    @Synchronized
+    fun isBracketedPasteModeEnabled(): Boolean = bracketedPasteMode
 
     /**
      * Handles a finger scroll like Termux: report wheel events to mouse-aware full-screen apps,
@@ -1091,6 +1096,7 @@ class TerminalEmulator(
                     25 -> cursorVisible = enabled
                     1000, 1002, 1003 -> mouseTracking = enabled
                     1006 -> sgrMouseProtocol = enabled
+                    2004 -> bracketedPasteMode = enabled
                     47, 1047, 1049 -> {
                         if (enabled != useAlternate) {
                             if (enabled) {

@@ -48,6 +48,8 @@ private const val MAX_DECODED_IMAGE_PIXELS = 8_000_000L
 private const val MAX_DECODED_IMAGE_DIMENSION = 4_096
 private const val TERMINAL_IMAGE_LINK_PREFIX = "tmuxer-image://"
 private const val MAX_IME_CONTEXT_CHARS = 1_024
+private const val BRACKETED_PASTE_START = "\u001B[200~"
+private const val BRACKETED_PASTE_END = "\u001B[201~"
 
 /** A decoded image retained only while its fullscreen preview is open. */
 data class TerminalImagePreview(
@@ -79,6 +81,23 @@ internal fun terminalImeReplacement(oldText: String, newText: String): TerminalI
         deleteCodePoints = oldText.codePointCount(oldOffset, oldText.length),
         insertText = newText.substring(newOffset)
     )
+}
+
+internal fun terminalPasteInput(text: String, bracketedPasteMode: Boolean): String {
+    if (!bracketedPasteMode) return text
+    val normalizedText = text.replace("\r\n", "\n").replace('\r', '\n')
+    return "$BRACKETED_PASTE_START$normalizedText$BRACKETED_PASTE_END"
+}
+
+internal fun terminalImeCommittedInput(text: String, bracketedPasteMode: Boolean): String {
+    // A single newline is the IME's Enter key. A commit containing both text and a line break is
+    // how Android keyboards commonly deliver a multiline clipboard paste.
+    val isMultilinePaste = text.length > 1 && text.any { it == '\n' || it == '\r' }
+    return if (isMultilinePaste && bracketedPasteMode) {
+        terminalPasteInput(text, bracketedPasteMode = true)
+    } else {
+        text.replace("\r\n", "\r").replace("\n", "\r")
+    }
 }
 
 private data class TerminalImageHitTarget(val bounds: RectF, val request: TerminalImageOpenRequest)
@@ -1257,7 +1276,7 @@ class TerminalView @JvmOverloads constructor(
         val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
         val text = clipboard.primaryClip?.getItemAt(0)?.coerceToText(context)?.toString()
         if (text.isNullOrEmpty()) return false
-        onInput(text)
+        onInput(terminalPasteInput(text, emulator?.isBracketedPasteModeEnabled() == true))
         performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
         return true
     }
@@ -1541,7 +1560,12 @@ class TerminalView @JvmOverloads constructor(
         }
 
         private fun sendCommittedText(text: CharSequence) {
-            onInput(text.toString().replace("\r\n", "\r").replace("\n", "\r"))
+            onInput(
+                terminalImeCommittedInput(
+                    text.toString(),
+                    emulator?.isBracketedPasteModeEnabled() == true
+                )
+            )
         }
 
         private fun mirrorKeyEventInEditable(event: KeyEvent) {

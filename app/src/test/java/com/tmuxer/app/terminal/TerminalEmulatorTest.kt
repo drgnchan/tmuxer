@@ -176,6 +176,18 @@ class TerminalEmulatorTest {
     }
 
     @Test
+    fun tracksBracketedPasteModeRequestedByPi() {
+        val terminal = TerminalEmulator(20, 5)
+        assertFalse(terminal.isBracketedPasteModeEnabled())
+
+        terminal.feed("\u001B[?2004h".toByteArray())
+        assertTrue(terminal.isBracketedPasteModeEnabled())
+
+        terminal.feed("\u001B[?2004l".toByteArray())
+        assertFalse(terminal.isBracketedPasteModeEnabled())
+    }
+
+    @Test
     fun scrollsTmuxAlternateScreenLocallyWithoutChangingShellHistory() {
         val replies = mutableListOf<String>()
         val terminal = TerminalEmulator(20, 5, replies::add)

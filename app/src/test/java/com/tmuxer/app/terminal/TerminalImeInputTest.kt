@@ -35,4 +35,33 @@ class TerminalImeInputTest {
             terminalImeReplacement("你🙂", "你们")
         )
     }
+
+    @Test
+    fun wrapsMultilineImeCommitAsBracketedPaste() {
+        assertEquals(
+            "\u001B[200~first line\nsecond line\u001B[201~",
+            terminalImeCommittedInput("first line\r\nsecond line", bracketedPasteMode = true)
+        )
+    }
+
+    @Test
+    fun keepsImeEnterAsAnEnterKey() {
+        assertEquals("\r", terminalImeCommittedInput("\n", bracketedPasteMode = true))
+    }
+
+    @Test
+    fun preservesLegacyMultilineInputWhenBracketedPasteIsDisabled() {
+        assertEquals(
+            "first line\rsecond line",
+            terminalImeCommittedInput("first line\nsecond line", bracketedPasteMode = false)
+        )
+    }
+
+    @Test
+    fun wrapsExplicitClipboardPasteAndNormalizesLineEndings() {
+        assertEquals(
+            "\u001B[200~first\nsecond\nthird\u001B[201~",
+            terminalPasteInput("first\r\nsecond\rthird", bracketedPasteMode = true)
+        )
+    }
 }
