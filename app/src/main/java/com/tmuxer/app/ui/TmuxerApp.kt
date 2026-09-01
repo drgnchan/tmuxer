@@ -1,5 +1,7 @@
 package com.tmuxer.app.ui
 
+import android.content.Intent
+import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -1537,6 +1539,24 @@ private fun TerminalScreen(
     var imageLoadGeneration by remember { mutableStateOf(0L) }
     var showExitSessionDialog by remember(selected?.sessionId) { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
+    val openTerminalWebLink: (String) -> Unit = { url ->
+        val uri = Uri.parse(url)
+        val chromeOpened = runCatching {
+            context.startActivity(
+                Intent(Intent.ACTION_VIEW, uri)
+                    .setPackage("com.android.chrome")
+                    .addCategory(Intent.CATEGORY_BROWSABLE)
+            )
+        }.isSuccess
+        if (!chromeOpened) {
+            runCatching {
+                context.startActivity(
+                    Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE)
+                )
+            }.onFailure { terminalViewModel.showNotice("无法打开链接") }
+        }
+    }
     val uploadProgress by terminalViewModel.uploadProgress.collectAsStateWithLifecycle()
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
@@ -1648,6 +1668,7 @@ private fun TerminalScreen(
                         onInput = terminalViewModel::sendTerminalInput
                         onTerminalResize = terminalViewModel::resizeTerminal
                         onImageClick = openTerminalImage
+                        onWebLinkClick = openTerminalWebLink
                         onNotice = terminalViewModel::showNotice
                     }
                 },
@@ -1657,6 +1678,7 @@ private fun TerminalScreen(
                     view.onInput = terminalViewModel::sendTerminalInput
                     view.onTerminalResize = terminalViewModel::resizeTerminal
                     view.onImageClick = openTerminalImage
+                    view.onWebLinkClick = openTerminalWebLink
                     view.onNotice = terminalViewModel::showNotice
                 },
                 modifier = Modifier.fillMaxSize()

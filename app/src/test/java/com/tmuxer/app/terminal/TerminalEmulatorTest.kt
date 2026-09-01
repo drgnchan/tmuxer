@@ -43,6 +43,21 @@ class TerminalEmulatorTest {
     }
 
     @Test
+    fun keepsOsc8WebLinksAndAcceptsOnlyHttpSchemes() {
+        val terminal = TerminalEmulator(30, 5)
+        val url = "https://example.com/docs?q=tmuxer"
+
+        terminal.feed("\u001B]8;;$url\u001B\\文档\u001B]8;;\u001B\\".toByteArray())
+
+        val hyperlink = terminal.snapshot().cells[0].hyperlink
+        assertEquals(url, hyperlink)
+        assertEquals(url, terminalWebUrlFromHyperlink(hyperlink))
+        assertEquals("http://example.com", terminalWebUrlFromHyperlink("http://example.com"))
+        assertEquals(null, terminalWebUrlFromHyperlink("file:///etc/passwd"))
+        assertEquals(null, terminalWebUrlFromHyperlink("javascript:alert(1)"))
+    }
+
+    @Test
     fun copiesLongOsc52TextToAndroidClipboardSink() {
         val copied = mutableListOf<String>()
         val terminal = TerminalEmulator(20, 5).apply {

@@ -82,6 +82,7 @@ internal fun terminalImeReplacement(oldText: String, newText: String): TerminalI
 }
 
 private data class TerminalImageHitTarget(val bounds: RectF, val request: TerminalImageOpenRequest)
+private data class TerminalWebLinkHitTarget(val bounds: RectF, val url: String)
 private data class TerminalTextSelection(
     val start: Int,
     val end: Int,
@@ -109,6 +110,17 @@ internal fun terminalImagePathFromHyperlink(hyperlink: String?): String? {
         it.startsWith('/') && it.length <= 4_096 && '\u0000' !in it
     }
 }
+
+internal fun terminalWebUrlFromHyperlink(hyperlink: String?): String? {
+    if (hyperlink.isNullOrEmpty() || hyperlink.length > 8_192 || hyperlink.any { it.isISOControl() }) {
+        return null
+    }
+    val scheme = runCatching { java.net.URI(hyperlink).scheme?.lowercase() }.getOrNull()
+    return hyperlink.takeIf { scheme == "http" || scheme == "https" }
+}
+
+private fun terminalHyperlinkIsClickable(hyperlink: String?): Boolean =
+    terminalImagePathFromHyperlink(hyperlink) != null || terminalWebUrlFromHyperlink(hyperlink) != null
 
 internal fun decodeTerminalImagePreview(data: ByteArray): Bitmap? {
     if (data.isEmpty()) return null
@@ -199,6 +211,7 @@ class TerminalView @JvmOverloads constructor(
         isSubpixelText = true
     }
     private val imageHitTargets = ArrayList<TerminalImageHitTarget>()
+    private val webLinkHitTargets = ArrayList<TerminalWebLinkHitTarget>()
     private val regularGlyphWidths = LruCache<String, Float>(512)
     private val boldGlyphWidths = LruCache<String, Float>(512)
     private val textRun = StringBuilder(256)
@@ -315,6 +328,7 @@ class TerminalView @JvmOverloads constructor(
             clearTextSelection()
             cachedSnapshot = null
             imageHitTargets.clear()
+            webLinkHitTargets.clear()
             snapshotDirty = true
             renderDirty = true
             appliedColumns = 0
@@ -326,6 +340,7 @@ class TerminalView @JvmOverloads constructor(
     var onInput: (String) -> Unit = {}
     var onTerminalResize: (columns: Int, rows: Int) -> Unit = { _, _ -> }
     var onImageClick: (TerminalImageOpenRequest) -> Unit = {}
+    var onWebLinkClick: (String) -> Unit = {}
     var onNotice: (String) -> Unit = {}
 
     init {
@@ -367,6 +382,7 @@ class TerminalView @JvmOverloads constructor(
 
     private fun drawSnapshot(canvas: Canvas, snapshot: TerminalSnapshot) {
         imageHitTargets.clear()
+        webLinkHitTargets.clear()
         for (row in 0 until snapshot.rows) {
             val rowOffset = row * snapshot.columns
             val top = verticalPadding + row * lineHeight
@@ -414,8 +430,8 @@ class TerminalView @JvmOverloads constructor(
                 }
 
                 val start = column
-                val imageLink = terminalImagePathFromHyperlink(cell.hyperlink) != null
-                val foreground = if (imageLink) {
+                val clickableLink = terminalHyperlinkIsClickable(cell.hyperlink)
+                val foreground = if (clickableLink) {
                     terminalTheme.cursorColor
                 } else if (cell.inverse) {
                     cell.background
@@ -423,13 +439,13 @@ class TerminalView @JvmOverloads constructor(
                     cell.foreground
                 }
                 val bold = cell.bold
-                val underline = cell.underline || imageLink
+                val underline = cell.underline || clickableLink
                 var hasVisibleText = false
                 textRun.clear()
                 while (column < snapshot.columns) {
                     val next = snapshot.cells[rowOffset + column]
-                    val nextImageLink = terminalImagePathFromHyperlink(next.hyperlink) != null
-                    val nextForeground = if (nextImageLink) {
+                    val nextClickableLink = terminalHyperlinkIsClickable(next.hyperlink)
+                    val nextForeground = if (nextClickableLink) {
                         terminalTheme.cursorColor
                     } else if (next.inverse) {
                         next.background
@@ -437,7 +453,7 @@ class TerminalView @JvmOverloads constructor(
                         next.foreground
                     }
                     if (next.width != 1 || nextForeground != foreground ||
-                        next.bold != bold || (next.underline || nextImageLink) != underline ||
+                        next.bold != bold || (next.underline || nextClickableLink) != underline ||
                         next.hyperlink != cell.hyperlink
                     ) {
                         break
@@ -475,6 +491,7 @@ class TerminalView @JvmOverloads constructor(
             }
         }
         collectTerminalImageLinkTargets(snapshot)
+        collectTerminalWebLinkTargets(snapshot)
         drawTerminalImages(canvas, snapshot)
         if (snapshot.cursorVisible && hasFocus()) {
             val left = horizontalPadding + snapshot.cursorColumn * characterWidth
@@ -536,8 +553,8 @@ class TerminalView @JvmOverloads constructor(
 
     private fun drawWideGlyph(canvas: Canvas, cell: TerminalCell, column: Int, baseline: Float) {
         if (cell.text == " ") return
-        val imageLink = terminalImagePathFromHyperlink(cell.hyperlink) != null
-        val foreground = if (imageLink) {
+        val clickableLink = terminalHyperlinkIsClickable(cell.hyperlink)
+        val foreground = if (clickableLink) {
             terminalTheme.cursorColor
         } else if (cell.inverse) {
             cell.background
@@ -572,7 +589,7 @@ class TerminalView @JvmOverloads constructor(
         } else {
             canvas.drawText(cell.text, left, baseline, textPaint)
         }
-        if (cell.underline || imageLink) {
+        if (cell.underline || clickableLink) {
             backgroundPaint.color = foreground
             canvas.drawRect(
                 left,
@@ -614,6 +631,36 @@ class TerminalView @JvmOverloads constructor(
                         remotePath = remotePath,
                         mimeType = null
                     )
+                )
+            }
+        }
+    }
+
+    private fun collectTerminalWebLinkTargets(snapshot: TerminalSnapshot) {
+        for (row in 0 until snapshot.rows) {
+            var column = 0
+            while (column < snapshot.columns) {
+                val hyperlink = snapshot.cells[row * snapshot.columns + column].hyperlink
+                val url = terminalWebUrlFromHyperlink(hyperlink)
+                if (url == null) {
+                    column++
+                    continue
+                }
+                val start = column
+                while (
+                    column < snapshot.columns &&
+                    snapshot.cells[row * snapshot.columns + column].hyperlink == hyperlink
+                ) {
+                    column++
+                }
+                webLinkHitTargets += TerminalWebLinkHitTarget(
+                    bounds = RectF(
+                        horizontalPadding + start * characterWidth,
+                        verticalPadding + row * lineHeight,
+                        horizontalPadding + column * characterWidth,
+                        verticalPadding + (row + 1) * lineHeight
+                    ),
+                    url = url
                 )
             }
         }
@@ -860,9 +907,13 @@ class TerminalView @JvmOverloads constructor(
                     }
                 } else if (!movedBeyondTouchSlop) {
                     val image = imageHitTargets.lastOrNull { it.bounds.contains(event.x, event.y) }
+                    val webLink = webLinkHitTargets.lastOrNull { it.bounds.contains(event.x, event.y) }
                     if (image != null) {
                         suppressKeyboardDoubleTap()
                         onImageClick(image.request)
+                    } else if (webLink != null) {
+                        suppressKeyboardDoubleTap()
+                        onWebLinkClick(webLink.url)
                     } else if (event.eventTime < keyboardTapSuppressedUntil) {
                         lastTapTime = 0L
                     } else {
