@@ -1584,6 +1584,7 @@ private fun TerminalScreen(
         }
     }
     val tabListState = rememberLazyListState()
+    val piMode = selected?.let { it.command == "pi" || it.name.equals("pi", true) } == true
     LaunchedEffect(selected?.windowId, windowIds) {
         val selectedIndex = windowIds.indexOf(selected?.windowId)
         if (selectedIndex >= 0) tabListState.animateScrollToItem(selectedIndex)
@@ -1656,6 +1657,23 @@ private fun TerminalScreen(
             }
         }
 
+        if (windows.isNotEmpty()) {
+            LazyRow(
+                state = tabListState,
+                modifier = Modifier.fillMaxWidth().background(RaisedSurface),
+                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
+                items(windows, key = { it.windowId }) { window ->
+                    WindowTab(
+                        window = window,
+                        selected = selected?.windowId == window.windowId,
+                        onClick = { onSwitchWindow(window) }
+                    )
+                }
+            }
+        }
+
         Box(
             Modifier.weight(1f).fillMaxWidth().background(Color(terminalTheme.backgroundColor))
         ) {
@@ -1683,6 +1701,13 @@ private fun TerminalScreen(
                 },
                 modifier = Modifier.fillMaxSize()
             )
+            if (piMode) {
+                PiPageNavigationOverlay(
+                    modifier = Modifier.align(Alignment.Center),
+                    onPrevious = { onSpecialKey("\u001B[1;6A") },
+                    onNext = { onSpecialKey("\u001B[1;6B") }
+                )
+            }
             if (loadingImage) {
                 Surface(
                     modifier = Modifier.align(Alignment.Center),
@@ -1763,25 +1788,8 @@ private fun TerminalScreen(
             }
         }
 
-        if (windows.isNotEmpty()) {
-            LazyRow(
-                state = tabListState,
-                modifier = Modifier.fillMaxWidth().background(RaisedSurface),
-                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 2.dp),
-                horizontalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                items(windows, key = { it.windowId }) { window ->
-                    WindowTab(
-                        window = window,
-                        selected = selected?.windowId == window.windowId,
-                        onClick = { onSwitchWindow(window) }
-                    )
-                }
-            }
-        }
-
         SpecialKeyBar(
-            piMode = selected?.let { it.command == "pi" || it.name.equals("pi", true) } == true,
+            piMode = piMode,
             ctrlActive = ctrlActive,
             shiftActive = shiftActive,
             altActive = altActive,
@@ -1998,20 +2006,12 @@ private fun SpecialKeyBar(
             if (piMode) {
                 KeyButton("Esc", description = "停止生成", compact = true) { onKey("\u001B") }
                 KeyButton("/", description = "输入斜杠命令", compact = true) { onKey("/") }
-                KeyButton("^D", description = "删除字符或退出", compact = true) { onKey("\u0004") }
                 KeyButton("^X", description = "复制上一条 Pi 回复", compact = true) { onKey("\u0018") }
                 KeyButton("^U", description = "清空输入", compact = true) { onKey("\u0015") }
                 KeyButton("^J", description = "插入换行", compact = true) { onKey("\u000A") }
-                CtrlShiftDirectionButton(
-                    direction = Icons.Rounded.KeyboardArrowUp,
-                    description = "跳到上一条信息"
-                ) { onKey("\u001B[1;6A") }
-                CtrlShiftDirectionButton(
-                    direction = Icons.Rounded.KeyboardArrowDown,
-                    description = "跳到下一条信息"
-                ) { onKey("\u001B[1;6B") }
                 KeyButton("^T", description = "展开或折叠思考内容", compact = true) { onKey("\u0014") }
                 KeyButton("^O", description = "展开或折叠工具输出", compact = true) { onKey("\u000F") }
+                ShiftTabButton { onKey("\u001B[Z") }
             } else {
                 KeyButton("Esc", description = "Escape") { onKey("\u001B") }
                 KeyButton("Ctrl", description = "Control", active = ctrlActive, onClick = onControl)
@@ -2038,7 +2038,6 @@ private fun SpecialKeyBar(
                 KeyButton("Shift", active = shiftActive, onClick = onShift)
                 KeyButton("Alt", active = altActive, onClick = onAlt)
                 KeyButton("Tab") { onKey("\t") }
-                ShiftTabButton { onKey("\u001B[Z") }
             }
             KeyButton(
                 icon = Icons.Rounded.KeyboardArrowLeft,
@@ -2091,6 +2090,30 @@ private fun ShiftTabButton(onClick: () -> Unit) {
         },
         onClick = onClick
     )
+}
+
+@Composable
+private fun PiPageNavigationOverlay(
+    modifier: Modifier = Modifier,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit
+) {
+    Column(
+        modifier = modifier.graphicsLayer { alpha = 0.58f },
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
+        CtrlShiftDirectionButton(
+            direction = Icons.Rounded.KeyboardArrowUp,
+            description = "Pi 上一页",
+            onClick = onPrevious
+        )
+        CtrlShiftDirectionButton(
+            direction = Icons.Rounded.KeyboardArrowDown,
+            description = "Pi 下一页",
+            onClick = onNext
+        )
+    }
 }
 
 @Composable
