@@ -1703,7 +1703,7 @@ private fun TerminalScreen(
             )
             if (piMode) {
                 PiPageNavigationOverlay(
-                    modifier = Modifier.align(Alignment.Center),
+                    modifier = Modifier.align(Alignment.CenterEnd),
                     onPrevious = { onSpecialKey("\u001B[1;6A") },
                     onNext = { onSpecialKey("\u001B[1;6B") }
                 )
