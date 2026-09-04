@@ -738,6 +738,15 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                             imageTerminal.mirrorKittyGraphicsTo(terminal)
                         }
                     },
+                    onSessionRenamed = {
+                        viewModelScope.launch {
+                            if (generation == terminalGeneration &&
+                                _connection.value is ConnectionState.Connected
+                            ) {
+                                refreshWindowsInternal()
+                            }
+                        }
+                    },
                     onClosed = { exitCode ->
                         viewModelScope.launch {
                             if (generation == terminalGeneration) {
@@ -962,6 +971,11 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             restoreStore.saveDashboard(profileId)
             _screen.value = AppScreen.Windows(profileId)
             scheduleWarmTerminalClose()
+            // Refresh on entry as a fallback for older tmux versions that cannot provide control
+            // mode rename notifications. The dashboard should never require a manual refresh.
+            if (_connection.value is ConnectionState.Connected) {
+                viewModelScope.launch { refreshWindowsInternal() }
+            }
         } ?: disconnectAndShowHosts()
     }
 

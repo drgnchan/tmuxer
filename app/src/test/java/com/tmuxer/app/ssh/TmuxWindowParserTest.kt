@@ -94,6 +94,14 @@ class TmuxWindowParserTest {
     }
 
     @Test
+    fun recognizesTmuxControlModeSessionRenameNotifications() {
+        assertTrue(isTmuxSessionRenamedNotification("%session-renamed \$0 新标题"))
+        assertTrue(isTmuxSessionRenamedNotification("%session-renamed 新标题"))
+        assertFalse(isTmuxSessionRenamedNotification("%session-changed \$0 新标题"))
+        assertFalse(isTmuxSessionRenamedNotification("%output %0 title"))
+    }
+
+    @Test
     fun parsesPrintableFieldSeparatorUsedByTmux() {
         val line = listOf(
             "mobile", "\$0", "2", "@7", "agent",
