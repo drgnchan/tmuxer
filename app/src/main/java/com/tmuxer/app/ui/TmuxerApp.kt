@@ -79,6 +79,8 @@ import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Password
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.StarBorder
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.UploadFile
 import androidx.compose.material.icons.rounded.Visibility
@@ -187,6 +189,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
     val connection by viewModel.connection.collectAsStateWithLifecycle()
     val windows by viewModel.windows.collectAsStateWithLifecycle()
     val recentPiDirectories by viewModel.recentPiDirectories.collectAsStateWithLifecycle()
+    val defaultPiDirectory by viewModel.defaultPiDirectory.collectAsStateWithLifecycle()
     val quickLaunchPresets by viewModel.quickLaunchPresets.collectAsStateWithLifecycle()
     val refreshing by viewModel.refreshing.collectAsStateWithLifecycle()
     val dashboardMessage by viewModel.dashboardMessage.collectAsStateWithLifecycle()
@@ -233,6 +236,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     recovering = connectionRecoveryStatus is ConnectionRecoveryStatus.Restoring,
                     windows = windows,
                     recentPiDirectories = recentPiDirectories,
+                    defaultPiDirectory = defaultPiDirectory,
                     quickLaunchPresets = quickLaunchPresets,
                     refreshing = refreshing,
                     dashboardMessage = dashboardMessage,
@@ -242,6 +246,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     onWindow = viewModel::openWindow,
                     onCreateSession = viewModel::createSession,
                     onRemoveRecentPiDirectory = viewModel::removeRecentPiDirectory,
+                    onSetDefaultPiDirectory = viewModel::setDefaultPiDirectory,
                     onSaveQuickLaunchPreset = viewModel::saveQuickLaunchPreset,
                     onRemoveQuickLaunchPreset = viewModel::removeQuickLaunchPreset,
                     onLaunchQuickTask = viewModel::launchQuickTask,
@@ -854,6 +859,7 @@ private fun WindowDashboardScreen(
     recovering: Boolean,
     windows: List<TmuxWindow>,
     recentPiDirectories: List<String>,
+    defaultPiDirectory: String,
     quickLaunchPresets: List<QuickLaunchPreset>,
     refreshing: Boolean,
     dashboardMessage: String?,
@@ -863,6 +869,7 @@ private fun WindowDashboardScreen(
     onWindow: (TmuxWindow) -> Unit,
     onCreateSession: (String, Boolean, String, Boolean, String) -> Unit,
     onRemoveRecentPiDirectory: (String) -> Unit,
+    onSetDefaultPiDirectory: (String) -> Unit,
     onSaveQuickLaunchPreset: (QuickLaunchPreset) -> Unit,
     onRemoveQuickLaunchPreset: (String) -> Unit,
     onLaunchQuickTask: (QuickLaunchPreset, String) -> Unit,
@@ -987,6 +994,7 @@ private fun WindowDashboardScreen(
     if (showCreateDialog) {
         CreateSessionDialog(
             recentPiDirectories = recentPiDirectories,
+            defaultPiDirectory = defaultPiDirectory,
             existingSessionNames = existingSessionNames,
             onDismiss = { showCreateDialog = false },
             onCreate = { name, launchPi, workingDirectory, launchWithoutSession, initialPrompt ->
@@ -994,6 +1002,7 @@ private fun WindowDashboardScreen(
                 onCreateSession(name, launchPi, workingDirectory, launchWithoutSession, initialPrompt)
             },
             onRemoveRecentPiDirectory = onRemoveRecentPiDirectory,
+            onSetDefaultPiDirectory = onSetDefaultPiDirectory,
             onListRemoteDirectories = onListRemoteDirectories
         )
     }
@@ -1489,16 +1498,20 @@ private enum class SessionLaunchMode { SHELL, PI }
 private fun PiWorkingDirectoryDropdown(
     value: String,
     recentDirectories: List<String>,
+    defaultDirectory: String,
     onSelect: (String) -> Unit,
+    onSetDefault: (String) -> Unit,
     onBrowse: () -> Unit,
     onRemoveRecentDirectory: (String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
     val selectedDirectory = value.ifBlank { "~" }
-    val directoryOptions = remember(selectedDirectory, recentDirectories) {
+    val savedDefaultDirectory = defaultDirectory.ifBlank { "~" }
+    val directoryOptions = remember(selectedDirectory, recentDirectories, savedDefaultDirectory) {
         buildList {
             add(selectedDirectory)
-            if (selectedDirectory != "~") add("~")
+            add(savedDefaultDirectory)
+            if ("~" !in this) add("~")
             recentDirectories.forEach { if (it !in this) add(it) }
         }
     }
@@ -1533,6 +1546,15 @@ private fun PiWorkingDirectoryDropdown(
                         overflow = TextOverflow.StartEllipsis,
                         modifier = Modifier.weight(1f)
                     )
+                    if (selectedDirectory == savedDefaultDirectory) {
+                        Spacer(Modifier.width(8.dp))
+                        Icon(
+                            Icons.Rounded.Star,
+                            "默认工作目录",
+                            tint = Amber,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    }
                     Spacer(Modifier.width(8.dp))
                     Icon(
                         if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
@@ -1545,6 +1567,7 @@ private fun PiWorkingDirectoryDropdown(
                         HorizontalDivider(color = Outline.copy(alpha = 0.7f))
                         directoryOptions.forEach { path ->
                             val selected = path == selectedDirectory
+                            val isDefault = path == savedDefaultDirectory
                             Row(
                                 modifier = Modifier.fillMaxWidth().clickable {
                                     onSelect(path)
@@ -1567,6 +1590,28 @@ private fun PiWorkingDirectoryDropdown(
                                     overflow = TextOverflow.StartEllipsis,
                                     modifier = Modifier.weight(1f)
                                 )
+                                TextButton(
+                                    onClick = {
+                                        onSelect(path)
+                                        onSetDefault(path)
+                                        expanded = false
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 6.dp),
+                                    modifier = Modifier.height(34.dp)
+                                ) {
+                                    Icon(
+                                        if (isDefault) Icons.Rounded.Star else Icons.Rounded.StarBorder,
+                                        if (isDefault) "当前默认目录" else "设为默认目录：$path",
+                                        tint = if (isDefault) Amber else TextSecondary,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(Modifier.width(3.dp))
+                                    Text(
+                                        if (isDefault) "默认" else "设为默认",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (isDefault) Amber else TextSecondary
+                                    )
+                                }
                                 if (path in recentDirectories) {
                                     IconButton(
                                         onClick = { onRemoveRecentDirectory(path) },
@@ -1616,16 +1661,18 @@ private fun PiWorkingDirectoryDropdown(
 @Composable
 private fun CreateSessionDialog(
     recentPiDirectories: List<String>,
+    defaultPiDirectory: String,
     existingSessionNames: Set<String>,
     onDismiss: () -> Unit,
     onCreate: (String, Boolean, String, Boolean, String) -> Unit,
     onRemoveRecentPiDirectory: (String) -> Unit,
+    onSetDefaultPiDirectory: (String) -> Unit,
     onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     var mode by remember { mutableStateOf(SessionLaunchMode.SHELL) }
     var launchWithoutSession by rememberSaveable { mutableStateOf(false) }
-    var workingDirectory by rememberSaveable { mutableStateOf("~") }
+    var workingDirectory by rememberSaveable { mutableStateOf(defaultPiDirectory) }
     var initialPrompt by rememberSaveable { mutableStateOf("") }
     var showDirectoryPicker by remember { mutableStateOf(false) }
     val resolvedSessionName = if (mode == SessionLaunchMode.PI) {
@@ -1724,7 +1771,9 @@ private fun CreateSessionDialog(
                     PiWorkingDirectoryDropdown(
                         value = workingDirectory,
                         recentDirectories = recentPiDirectories,
+                        defaultDirectory = defaultPiDirectory,
                         onSelect = { workingDirectory = it },
+                        onSetDefault = onSetDefaultPiDirectory,
                         onBrowse = { showDirectoryPicker = true },
                         onRemoveRecentDirectory = onRemoveRecentPiDirectory
                     )
@@ -1747,7 +1796,6 @@ private fun CreateSessionDialog(
                         onValueChange = { initialPrompt = it.take(16_384) },
                         label = "启动提示（可选）",
                         placeholder = "/skill:example 任务内容",
-                        minLines = 2,
                         maxLines = 5,
                         textStyleMonospace = true
                     )

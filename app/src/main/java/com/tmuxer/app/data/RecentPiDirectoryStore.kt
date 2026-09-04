@@ -3,9 +3,10 @@ package com.tmuxer.app.data
 import android.content.Context
 import org.json.JSONArray
 
-/** Stores a per-host MRU list of directories used to launch Pi workspaces. */
+/** Stores per-host recent and default directories used to launch Pi workspaces. */
 class RecentPiDirectoryStore(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
+    private val defaultPreferences = context.getSharedPreferences(DEFAULT_PREFERENCES, Context.MODE_PRIVATE)
 
     @Synchronized
     fun load(profileId: String): List<String> {
@@ -39,6 +40,17 @@ class RecentPiDirectoryStore(context: Context) {
         return updated
     }
 
+    @Synchronized
+    fun loadDefault(profileId: String): String =
+        normalizePiDirectory(defaultPreferences.getString(profileId, null).orEmpty()) ?: "~"
+
+    @Synchronized
+    fun setDefault(profileId: String, directory: String): String {
+        val selected = normalizePiDirectory(directory) ?: "~"
+        defaultPreferences.edit().putString(profileId, selected).apply()
+        return selected
+    }
+
     private fun save(profileId: String, directories: List<String>) {
         if (directories.isEmpty()) {
             preferences.edit().remove(profileId).apply()
@@ -50,10 +62,12 @@ class RecentPiDirectoryStore(context: Context) {
 
     fun removeProfile(profileId: String) {
         preferences.edit().remove(profileId).apply()
+        defaultPreferences.edit().remove(profileId).apply()
     }
 
     private companion object {
         const val PREFERENCES = "recent_pi_directories"
+        const val DEFAULT_PREFERENCES = "default_pi_directories"
     }
 }
 

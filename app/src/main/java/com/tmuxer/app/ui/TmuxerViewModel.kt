@@ -197,6 +197,11 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     )
     val recentPiDirectories = _recentPiDirectories.asStateFlow()
 
+    private val _defaultPiDirectory = MutableStateFlow(
+        restoreStore.load()?.profileId?.let(recentPiDirectoryStore::loadDefault) ?: "~"
+    )
+    val defaultPiDirectory = _defaultPiDirectory.asStateFlow()
+
     private val _quickLaunchPresets = MutableStateFlow(
         restoreStore.load()?.profileId?.let(quickLaunchPresetStore::load).orEmpty()
     )
@@ -279,6 +284,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         if (profile == null) {
             restoreStore.clear()
             _recentPiDirectories.value = emptyList()
+            _defaultPiDirectory.value = "~"
             _quickLaunchPresets.value = emptyList()
             return
         }
@@ -307,6 +313,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun prepareRestoreUi(profile: SshProfile, restore: ConnectionRestoreState) {
         _recentPiDirectories.value = recentPiDirectoryStore.load(profile.id)
+        _defaultPiDirectory.value = recentPiDirectoryStore.loadDefault(profile.id)
         _quickLaunchPresets.value = quickLaunchPresetStore.load(profile.id)
         _connection.value = ConnectionState.Connecting(profile)
         restore.terminalTarget?.let { target ->
@@ -445,6 +452,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         _profiles.value = updated
         profileStore.save(updated)
         _recentPiDirectories.value = emptyList()
+        _defaultPiDirectory.value = "~"
         _quickLaunchPresets.value = emptyList()
         _screen.value = AppScreen.Hosts
     }
@@ -461,6 +469,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         recoveryJob = null
         restoreStore.saveDashboard(profile.id)
         _recentPiDirectories.value = recentPiDirectoryStore.load(profile.id)
+        _defaultPiDirectory.value = recentPiDirectoryStore.loadDefault(profile.id)
         _quickLaunchPresets.value = quickLaunchPresetStore.load(profile.id)
         connectJob?.cancel()
         refreshJob?.cancel()
@@ -604,6 +613,14 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     fun removeRecentPiDirectory(directory: String) {
         val profileId = currentProfile()?.id ?: return
         _recentPiDirectories.value = recentPiDirectoryStore.remove(profileId, directory)
+    }
+
+    fun setDefaultPiDirectory(directory: String) {
+        val profileId = currentProfile()?.id ?: return
+        val selected = recentPiDirectoryStore.setDefault(profileId, directory)
+        _defaultPiDirectory.value = selected
+        _recentPiDirectories.value = recentPiDirectoryStore.record(profileId, selected)
+        _notices.tryEmit("默认工作目录已设为 $selected")
     }
 
     fun saveQuickLaunchPreset(preset: QuickLaunchPreset) {
@@ -1058,6 +1075,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         _connection.value = ConnectionState.Disconnected
         _windows.value = emptyList()
         _recentPiDirectories.value = emptyList()
+        _defaultPiDirectory.value = "~"
         _quickLaunchPresets.value = emptyList()
         _selectedWindow.value = null
         _dashboardMessage.value = null
