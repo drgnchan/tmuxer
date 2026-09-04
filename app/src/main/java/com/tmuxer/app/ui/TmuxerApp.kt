@@ -1590,26 +1590,19 @@ private fun PiWorkingDirectoryDropdown(
                                     overflow = TextOverflow.StartEllipsis,
                                     modifier = Modifier.weight(1f)
                                 )
-                                TextButton(
+                                IconButton(
                                     onClick = {
                                         onSelect(path)
                                         onSetDefault(path)
                                         expanded = false
                                     },
-                                    contentPadding = PaddingValues(horizontal = 6.dp),
-                                    modifier = Modifier.height(34.dp)
+                                    modifier = Modifier.size(34.dp)
                                 ) {
                                     Icon(
                                         if (isDefault) Icons.Rounded.Star else Icons.Rounded.StarBorder,
                                         if (isDefault) "当前默认目录" else "设为默认目录：$path",
                                         tint = if (isDefault) Amber else TextSecondary,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(Modifier.width(3.dp))
-                                    Text(
-                                        if (isDefault) "默认" else "设为默认",
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = if (isDefault) Amber else TextSecondary
+                                        modifier = Modifier.size(18.dp)
                                     )
                                 }
                                 if (path in recentDirectories) {
