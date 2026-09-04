@@ -217,10 +217,13 @@ class SshManager(context: Context) {
         name: String,
         launchPi: Boolean = false,
         workingDirectory: String = "",
-        launchWithoutSession: Boolean = false
+        launchWithoutSession: Boolean = false,
+        initialPrompt: String = ""
     ) = withContext(Dispatchers.IO) {
         val safeName = name.trim()
         require(safeName.isNotEmpty()) { "会话名不能为空" }
+        require(initialPrompt.length <= MAX_INITIAL_PI_PROMPT_LENGTH) { "启动提示过长" }
+        require('\u0000' !in initialPrompt) { "启动提示包含无效字符" }
         val piCheck = if (launchPi) buildPiExecutableCheckCommand() else ""
         val requestedDirectory = workingDirectory.trim()
         val directorySetup = if (launchPi && requestedDirectory.isNotEmpty()) {
@@ -250,7 +253,11 @@ class SshManager(context: Context) {
             // rows). A temporary extension stores image tool results and inserts one OSC 8 link.
             val piEnvironment = "env TERM=xterm-256color COLORTERM=truecolor " +
                 "PATH=\"\$(dirname \"\$TMUXER_PI_BIN\"):\$PATH\""
-            val paneCommand = buildPiPaneCommand(piEnvironment, launchWithoutSession)
+            val paneCommand = buildPiPaneCommand(
+                environment = piEnvironment,
+                launchWithoutSession = launchWithoutSession,
+                initialPrompt = initialPrompt
+            )
             " && (tmux set-option -g extended-keys on 2>/dev/null || true; " +
                 "tmux set-option -g extended-keys-format csi-u 2>/dev/null || true; " +
                 "tmux show-options -gv terminal-features 2>/dev/null | " +
@@ -793,13 +800,19 @@ internal fun buildPiExecutableCheckCommand(): String =
         "2>/dev/null | tail -n 1); fi; " +
         "if [ ! -x \"\$PI_BIN\" ]; then printf '__TMUXER_PI_MISSING__\\n'; exit 127; fi; "
 
+internal const val MAX_INITIAL_PI_PROMPT_LENGTH = 16_384
+
 internal fun buildPiPaneCommand(
     environment: String,
-    launchWithoutSession: Boolean
+    launchWithoutSession: Boolean,
+    initialPrompt: String = ""
 ): String {
     val sessionOption = if (launchWithoutSession) " --no-session" else ""
+    val promptArgument = initialPrompt.trim().takeIf { it.isNotEmpty() }
+        ?.let { " -- ${shellQuote(it)}" }
+        .orEmpty()
     return "sleep 1; exec $environment \"\$TMUXER_PI_BIN\"$sessionOption " +
-        "--tui-mode fullscreen -e \"\$TMUXER_IMAGE_EXTENSION\""
+        "--tui-mode fullscreen -e \"\$TMUXER_IMAGE_EXTENSION\"$promptArgument"
 }
 
 internal fun buildTmuxNewSessionCommand(

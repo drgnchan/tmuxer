@@ -43,6 +43,29 @@ class TmuxWindowParserTest {
     }
 
     @Test
+    fun piTaskPassesInitialPromptAfterOptionTerminator() {
+        val command = buildPiPaneCommand(
+            environment = "env TERM=xterm-256color",
+            launchWithoutSession = false,
+            initialPrompt = "/skill:doris 查 user's order\n第二行"
+        )
+
+        assertTrue(command.contains("-e \"\$TMUXER_IMAGE_EXTENSION\" -- "))
+        assertTrue(command.endsWith("'/skill:doris 查 user'\"'\"'s order\n第二行'"))
+    }
+
+    @Test
+    fun blankInitialPromptKeepsInteractiveLaunchWithoutArgument() {
+        val command = buildPiPaneCommand(
+            environment = "env TERM=xterm-256color",
+            launchWithoutSession = false,
+            initialPrompt = "  "
+        )
+
+        assertFalse(command.contains(" -- '"))
+    }
+
+    @Test
     fun piSessionCapturesInitialWindowIdWithoutAssumingBaseIndex() {
         val command = buildTmuxNewSessionCommand(
             sessionName = "team's work",

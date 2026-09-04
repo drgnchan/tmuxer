@@ -12,7 +12,10 @@ import com.tmuxer.app.data.AppScreen
 import com.tmuxer.app.data.ConnectionRestoreState
 import com.tmuxer.app.data.ConnectionRestoreStore
 import com.tmuxer.app.data.ConnectionState
+import com.tmuxer.app.data.QuickLaunchPreset
+import com.tmuxer.app.data.QuickLaunchPresetStore
 import com.tmuxer.app.data.RecentPiDirectoryStore
+import com.tmuxer.app.data.buildQuickLaunchPrompt
 import com.tmuxer.app.data.SecureProfileStore
 import com.tmuxer.app.data.SshProfile
 import com.tmuxer.app.data.TmuxWindow
@@ -174,6 +177,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private val profileStore = SecureProfileStore(application)
     private val restoreStore = ConnectionRestoreStore(application)
     private val recentPiDirectoryStore = RecentPiDirectoryStore(application)
+    private val quickLaunchPresetStore = QuickLaunchPresetStore(application)
     private val sshManager = SshManager(application)
 
     private val _profiles = MutableStateFlow(profileStore.load())
@@ -192,6 +196,11 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         restoreStore.load()?.profileId?.let(recentPiDirectoryStore::load).orEmpty()
     )
     val recentPiDirectories = _recentPiDirectories.asStateFlow()
+
+    private val _quickLaunchPresets = MutableStateFlow(
+        restoreStore.load()?.profileId?.let(quickLaunchPresetStore::load).orEmpty()
+    )
+    val quickLaunchPresets = _quickLaunchPresets.asStateFlow()
 
     private val _refreshing = MutableStateFlow(false)
     val refreshing = _refreshing.asStateFlow()
@@ -270,6 +279,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         if (profile == null) {
             restoreStore.clear()
             _recentPiDirectories.value = emptyList()
+            _quickLaunchPresets.value = emptyList()
             return
         }
         if (connectJob?.isActive == true || recoveryJob?.isActive == true) return
@@ -297,6 +307,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun prepareRestoreUi(profile: SshProfile, restore: ConnectionRestoreState) {
         _recentPiDirectories.value = recentPiDirectoryStore.load(profile.id)
+        _quickLaunchPresets.value = quickLaunchPresetStore.load(profile.id)
         _connection.value = ConnectionState.Connecting(profile)
         restore.terminalTarget?.let { target ->
             _selectedWindow.value = target.placeholder()
@@ -429,10 +440,12 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     fun deleteProfile(profile: SshProfile) {
         if (restoreStore.load()?.profileId == profile.id) restoreStore.clear()
         recentPiDirectoryStore.removeProfile(profile.id)
+        quickLaunchPresetStore.removeProfile(profile.id)
         val updated = _profiles.value.filterNot { it.id == profile.id }
         _profiles.value = updated
         profileStore.save(updated)
         _recentPiDirectories.value = emptyList()
+        _quickLaunchPresets.value = emptyList()
         _screen.value = AppScreen.Hosts
     }
 
@@ -448,6 +461,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         recoveryJob = null
         restoreStore.saveDashboard(profile.id)
         _recentPiDirectories.value = recentPiDirectoryStore.load(profile.id)
+        _quickLaunchPresets.value = quickLaunchPresetStore.load(profile.id)
         connectJob?.cancel()
         refreshJob?.cancel()
         terminalGeneration++
@@ -537,7 +551,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         name: String,
         launchPi: Boolean = false,
         workingDirectory: String = "",
-        launchWithoutSession: Boolean = false
+        launchWithoutSession: Boolean = false,
+        initialPrompt: String = ""
     ) {
         val profileId = currentProfile()?.id
         viewModelScope.launch {
@@ -558,7 +573,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                     name = safeName,
                     launchPi = launchPi,
                     workingDirectory = workingDirectory,
-                    launchWithoutSession = launchWithoutSession
+                    launchWithoutSession = launchWithoutSession,
+                    initialPrompt = initialPrompt
                 )
                 val latest = sshManager.listWindows()
                 _windows.value = latest
@@ -588,6 +604,31 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     fun removeRecentPiDirectory(directory: String) {
         val profileId = currentProfile()?.id ?: return
         _recentPiDirectories.value = recentPiDirectoryStore.remove(profileId, directory)
+    }
+
+    fun saveQuickLaunchPreset(preset: QuickLaunchPreset) {
+        val profileId = currentProfile()?.id ?: return
+        runCatching { quickLaunchPresetStore.upsert(profileId, preset) }
+            .onSuccess {
+                _quickLaunchPresets.value = it
+                _notices.tryEmit("快捷任务“${preset.title.trim()}”已保存")
+            }
+            .onFailure { _notices.tryEmit(friendlyError(it)) }
+    }
+
+    fun removeQuickLaunchPreset(presetId: String) {
+        val profileId = currentProfile()?.id ?: return
+        _quickLaunchPresets.value = quickLaunchPresetStore.remove(profileId, presetId)
+    }
+
+    fun launchQuickTask(preset: QuickLaunchPreset, input: String) {
+        createSession(
+            name = preset.sessionName,
+            launchPi = true,
+            workingDirectory = preset.workingDirectory,
+            launchWithoutSession = preset.launchWithoutSession,
+            initialPrompt = buildQuickLaunchPrompt(preset.promptTemplate, input)
+        )
     }
 
     suspend fun listRemoteDirectories(path: String): RemoteDirectoryListing =
@@ -1017,6 +1058,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         _connection.value = ConnectionState.Disconnected
         _windows.value = emptyList()
         _recentPiDirectories.value = emptyList()
+        _quickLaunchPresets.value = emptyList()
         _selectedWindow.value = null
         _dashboardMessage.value = null
         _terminalConnected.value = false

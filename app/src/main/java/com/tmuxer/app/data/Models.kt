@@ -20,6 +20,15 @@ data class SshProfile(
     val endpoint: String get() = "$username@$host${if (port == 22) "" else ":$port"}"
 }
 
+data class QuickLaunchPreset(
+    val id: String = UUID.randomUUID().toString(),
+    val title: String,
+    val promptTemplate: String,
+    val workingDirectory: String = "~",
+    val launchWithoutSession: Boolean = false,
+    val sessionName: String = ""
+)
+
 data class TmuxWindow(
     val sessionName: String,
     val sessionId: String,

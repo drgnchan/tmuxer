@@ -148,7 +148,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tmuxer.app.data.AppScreen
 import com.tmuxer.app.data.AuthType
 import com.tmuxer.app.data.ConnectionState
+import com.tmuxer.app.data.QUICK_LAUNCH_INPUT_PLACEHOLDER
+import com.tmuxer.app.data.QuickLaunchPreset
 import com.tmuxer.app.data.SshProfile
+import com.tmuxer.app.data.buildQuickLaunchPrompt
 import com.tmuxer.app.data.TmuxWindow
 import com.tmuxer.app.ssh.RemoteDirectoryListing
 import com.tmuxer.app.terminal.TerminalImageOpenRequest
@@ -184,6 +187,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
     val connection by viewModel.connection.collectAsStateWithLifecycle()
     val windows by viewModel.windows.collectAsStateWithLifecycle()
     val recentPiDirectories by viewModel.recentPiDirectories.collectAsStateWithLifecycle()
+    val quickLaunchPresets by viewModel.quickLaunchPresets.collectAsStateWithLifecycle()
     val refreshing by viewModel.refreshing.collectAsStateWithLifecycle()
     val dashboardMessage by viewModel.dashboardMessage.collectAsStateWithLifecycle()
     val selectedWindow by viewModel.selectedWindow.collectAsStateWithLifecycle()
@@ -229,6 +233,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     recovering = connectionRecoveryStatus is ConnectionRecoveryStatus.Restoring,
                     windows = windows,
                     recentPiDirectories = recentPiDirectories,
+                    quickLaunchPresets = quickLaunchPresets,
                     refreshing = refreshing,
                     dashboardMessage = dashboardMessage,
                     onBack = viewModel::disconnectAndShowHosts,
@@ -237,6 +242,9 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     onWindow = viewModel::openWindow,
                     onCreateSession = viewModel::createSession,
                     onRemoveRecentPiDirectory = viewModel::removeRecentPiDirectory,
+                    onSaveQuickLaunchPreset = viewModel::saveQuickLaunchPreset,
+                    onRemoveQuickLaunchPreset = viewModel::removeQuickLaunchPreset,
+                    onLaunchQuickTask = viewModel::launchQuickTask,
                     onListRemoteDirectories = viewModel::listRemoteDirectories
                 )
                 AppScreen.Terminal -> TerminalScreen(
@@ -846,17 +854,24 @@ private fun WindowDashboardScreen(
     recovering: Boolean,
     windows: List<TmuxWindow>,
     recentPiDirectories: List<String>,
+    quickLaunchPresets: List<QuickLaunchPreset>,
     refreshing: Boolean,
     dashboardMessage: String?,
     onBack: () -> Unit,
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onWindow: (TmuxWindow) -> Unit,
-    onCreateSession: (String, Boolean, String, Boolean) -> Unit,
+    onCreateSession: (String, Boolean, String, Boolean, String) -> Unit,
     onRemoveRecentPiDirectory: (String) -> Unit,
+    onSaveQuickLaunchPreset: (QuickLaunchPreset) -> Unit,
+    onRemoveQuickLaunchPreset: (String) -> Unit,
+    onLaunchQuickTask: (QuickLaunchPreset, String) -> Unit,
     onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
+    var editingQuickPreset by remember { mutableStateOf<QuickLaunchPreset?>(null) }
+    var showNewQuickPreset by remember { mutableStateOf(false) }
+    var launchingQuickPreset by remember { mutableStateOf<QuickLaunchPreset?>(null) }
     val groups = remember(windows) { windows.groupBy { it.sessionId } }
     val existingSessionNames = remember(windows) { windows.map { it.sessionName }.toSet() }
     val connected = connection is ConnectionState.Connected
@@ -941,6 +956,16 @@ private fun WindowDashboardScreen(
                     if (dashboardMessage != null) {
                         item { InlineMessage(dashboardMessage) }
                     }
+                    item {
+                        QuickLaunchSection(
+                            presets = quickLaunchPresets,
+                            enabled = connected,
+                            onAdd = { showNewQuickPreset = true },
+                            onLaunch = { launchingQuickPreset = it },
+                            onEdit = { editingQuickPreset = it },
+                            onDelete = onRemoveQuickLaunchPreset
+                        )
+                    }
                     if (windows.isEmpty() && dashboardMessage == null) {
                         item { EmptyWindows { showCreateDialog = true } }
                     } else {
@@ -964,14 +989,318 @@ private fun WindowDashboardScreen(
             recentPiDirectories = recentPiDirectories,
             existingSessionNames = existingSessionNames,
             onDismiss = { showCreateDialog = false },
-            onCreate = { name, launchPi, workingDirectory, launchWithoutSession ->
+            onCreate = { name, launchPi, workingDirectory, launchWithoutSession, initialPrompt ->
                 showCreateDialog = false
-                onCreateSession(name, launchPi, workingDirectory, launchWithoutSession)
+                onCreateSession(name, launchPi, workingDirectory, launchWithoutSession, initialPrompt)
             },
             onRemoveRecentPiDirectory = onRemoveRecentPiDirectory,
             onListRemoteDirectories = onListRemoteDirectories
         )
     }
+
+    if (showNewQuickPreset || editingQuickPreset != null) {
+        QuickLaunchPresetEditor(
+            preset = editingQuickPreset,
+            onDismiss = {
+                showNewQuickPreset = false
+                editingQuickPreset = null
+            },
+            onSave = {
+                onSaveQuickLaunchPreset(it)
+                showNewQuickPreset = false
+                editingQuickPreset = null
+            },
+            onListRemoteDirectories = onListRemoteDirectories
+        )
+    }
+
+    launchingQuickPreset?.let { preset ->
+        QuickLaunchDialog(
+            preset = preset,
+            onDismiss = { launchingQuickPreset = null },
+            onLaunch = { input ->
+                launchingQuickPreset = null
+                onLaunchQuickTask(preset, input)
+            }
+        )
+    }
+}
+
+@Composable
+private fun QuickLaunchSection(
+    presets: List<QuickLaunchPreset>,
+    enabled: Boolean,
+    onAdd: () -> Unit,
+    onLaunch: (QuickLaunchPreset) -> Unit,
+    onEdit: (QuickLaunchPreset) -> Unit,
+    onDelete: (String) -> Unit
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(Icons.Rounded.AutoAwesome, null, tint = Mint, modifier = Modifier.size(17.dp))
+            Spacer(Modifier.width(7.dp))
+            Text("快捷任务", fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            TextButton(onClick = onAdd) {
+                Icon(Icons.Rounded.Add, null, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(4.dp))
+                Text("添加")
+            }
+        }
+        if (presets.isEmpty()) {
+            Surface(
+                modifier = Modifier.fillMaxWidth().clickable(onClick = onAdd),
+                color = DeepSurface,
+                shape = RoundedCornerShape(13.dp),
+                border = BorderStroke(1.dp, Outline.copy(alpha = 0.75f))
+            ) {
+                Text(
+                    "保存常用 Skill 和 Prompt，下次只输入几个字即可启动",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp)
+                )
+            }
+        } else {
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
+                items(presets, key = { it.id }) { preset ->
+                    OutlinedCard(
+                        onClick = { if (enabled) onLaunch(preset) },
+                        modifier = Modifier.width(250.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        colors = CardDefaults.outlinedCardColors(containerColor = DeepSurface),
+                        border = BorderStroke(1.dp, Outline.copy(alpha = 0.75f))
+                    ) {
+                        Column(Modifier.padding(start = 13.dp, top = 10.dp, bottom = 10.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    preset.title,
+                                    fontWeight = FontWeight.SemiBold,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                IconButton(onClick = { onEdit(preset) }, modifier = Modifier.size(34.dp)) {
+                                    Icon(Icons.Rounded.Edit, "编辑${preset.title}", modifier = Modifier.size(17.dp))
+                                }
+                                IconButton(onClick = { onDelete(preset.id) }, modifier = Modifier.size(34.dp)) {
+                                    Icon(
+                                        Icons.Rounded.Delete,
+                                        "删除${preset.title}",
+                                        tint = TextSecondary,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
+                            }
+                            Text(
+                                preset.promptTemplate.ifBlank { "直接使用输入内容" },
+                                color = TerminalBlue,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.padding(end = 13.dp)
+                            )
+                            Spacer(Modifier.height(5.dp))
+                            Text(
+                                "${preset.workingDirectory} · ${if (preset.launchWithoutSession) "临时" else "正常"}",
+                                color = TextSecondary,
+                                style = MaterialTheme.typography.labelSmall,
+                                fontFamily = FontFamily.Monospace,
+                                maxLines = 1,
+                                overflow = TextOverflow.StartEllipsis,
+                                modifier = Modifier.padding(end = 13.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun QuickLaunchPresetEditor(
+    preset: QuickLaunchPreset?,
+    onDismiss: () -> Unit,
+    onSave: (QuickLaunchPreset) -> Unit,
+    onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
+) {
+    var title by rememberSaveable(preset?.id) { mutableStateOf(preset?.title.orEmpty()) }
+    var promptTemplate by rememberSaveable(preset?.id) { mutableStateOf(preset?.promptTemplate.orEmpty()) }
+    var workingDirectory by rememberSaveable(preset?.id) {
+        mutableStateOf(preset?.workingDirectory ?: "~")
+    }
+    var launchWithoutSession by rememberSaveable(preset?.id) {
+        mutableStateOf(preset?.launchWithoutSession ?: false)
+    }
+    var sessionName by rememberSaveable(preset?.id) { mutableStateOf(preset?.sessionName.orEmpty()) }
+    var showDirectoryPicker by remember { mutableStateOf(false) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.AutoAwesome, null, tint = Mint) },
+        title = { Text(if (preset == null) "添加快捷任务" else "编辑快捷任务") },
+        text = {
+            Column(
+                modifier = Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState())
+            ) {
+                AppTextField(
+                    value = title,
+                    onValueChange = { title = it.take(40) },
+                    label = "名称",
+                    placeholder = "例如：查 Doris"
+                )
+                Spacer(Modifier.height(10.dp))
+                AppTextField(
+                    value = promptTemplate,
+                    onValueChange = { promptTemplate = it.take(16_384) },
+                    label = "Prompt 模板",
+                    placeholder = "/skill:doris 查询 $QUICK_LAUNCH_INPUT_PLACEHOLDER",
+                    minLines = 3,
+                    maxLines = 7,
+                    textStyleMonospace = true
+                )
+                Spacer(Modifier.height(5.dp))
+                Text(
+                    "用 $QUICK_LAUNCH_INPUT_PLACEHOLDER 标记每次输入的位置；不写占位符时，输入会自动追加。",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelSmall
+                )
+                Spacer(Modifier.height(10.dp))
+                AppTextField(
+                    value = workingDirectory,
+                    onValueChange = { workingDirectory = it.take(512) },
+                    label = "工作目录",
+                    placeholder = "~",
+                    trailing = {
+                        IconButton(onClick = { showDirectoryPicker = true }) {
+                            Icon(Icons.Rounded.FolderOpen, "选择远程工作目录")
+                        }
+                    },
+                    textStyleMonospace = true
+                )
+                Spacer(Modifier.height(10.dp))
+                Text("启动方式", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth().background(RaisedSurface, RoundedCornerShape(13.dp))
+                        .padding(4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    SessionModeButton(
+                        label = "正常任务",
+                        icon = { Text("pi", fontFamily = FontFamily.Monospace) },
+                        selected = !launchWithoutSession,
+                        modifier = Modifier.weight(1f),
+                        onClick = { launchWithoutSession = false }
+                    )
+                    SessionModeButton(
+                        label = "临时任务",
+                        icon = { Text("pi", fontFamily = FontFamily.Monospace) },
+                        selected = launchWithoutSession,
+                        modifier = Modifier.weight(1f),
+                        onClick = { launchWithoutSession = true }
+                    )
+                }
+                Spacer(Modifier.height(10.dp))
+                AppTextField(
+                    value = sessionName,
+                    onValueChange = { sessionName = it.replace(' ', '-').take(40) },
+                    label = "会话名称（可选）",
+                    placeholder = "自动使用目录名"
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(
+                enabled = title.isNotBlank(),
+                onClick = {
+                    onSave(
+                        QuickLaunchPreset(
+                            id = preset?.id ?: java.util.UUID.randomUUID().toString(),
+                            title = title,
+                            promptTemplate = promptTemplate,
+                            workingDirectory = workingDirectory,
+                            launchWithoutSession = launchWithoutSession,
+                            sessionName = sessionName
+                        )
+                    )
+                }
+            ) { Text("保存") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
+
+    if (showDirectoryPicker) {
+        RemoteDirectoryPicker(
+            initialPath = workingDirectory.ifBlank { "~" },
+            onLoad = onListRemoteDirectories,
+            onDismiss = { showDirectoryPicker = false },
+            onSelect = {
+                workingDirectory = it
+                showDirectoryPicker = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun QuickLaunchDialog(
+    preset: QuickLaunchPreset,
+    onDismiss: () -> Unit,
+    onLaunch: (String) -> Unit
+) {
+    var input by rememberSaveable(preset.id) { mutableStateOf("") }
+    val prompt = buildQuickLaunchPrompt(preset.promptTemplate, input)
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = { Icon(Icons.Rounded.AutoAwesome, null, tint = Mint) },
+        title = { Text(preset.title) },
+        text = {
+            Column {
+                AppTextField(
+                    value = input,
+                    onValueChange = { input = it.take(16_384) },
+                    label = "补充内容（可选）",
+                    placeholder = if (QUICK_LAUNCH_INPUT_PLACEHOLDER in preset.promptTemplate) {
+                        "替换 $QUICK_LAUNCH_INPUT_PLACEHOLDER"
+                    } else {
+                        "追加到 Prompt"
+                    },
+                    minLines = 2,
+                    maxLines = 5
+                )
+                Spacer(Modifier.height(10.dp))
+                Text("将提交", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                Spacer(Modifier.height(5.dp))
+                Surface(color = DeepSurface, shape = RoundedCornerShape(10.dp)) {
+                    Text(
+                        prompt.ifBlank { "不提交初始 Prompt" },
+                        color = if (prompt.isBlank()) TextSecondary else TerminalBlue,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace,
+                        maxLines = 5,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.fillMaxWidth().padding(10.dp)
+                    )
+                }
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    "${preset.workingDirectory} · ${if (preset.launchWithoutSession) "临时任务" else "正常任务"}",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.labelSmall,
+                    fontFamily = FontFamily.Monospace
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onLaunch(input) }) { Text("立即启动") }
+        },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
+    )
 }
 
 @Composable
@@ -1161,7 +1490,7 @@ private fun CreateSessionDialog(
     recentPiDirectories: List<String>,
     existingSessionNames: Set<String>,
     onDismiss: () -> Unit,
-    onCreate: (String, Boolean, String, Boolean) -> Unit,
+    onCreate: (String, Boolean, String, Boolean, String) -> Unit,
     onRemoveRecentPiDirectory: (String) -> Unit,
     onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
 ) {
@@ -1169,6 +1498,7 @@ private fun CreateSessionDialog(
     var mode by remember { mutableStateOf(SessionLaunchMode.SHELL) }
     var launchWithoutSession by rememberSaveable { mutableStateOf(false) }
     var workingDirectory by rememberSaveable { mutableStateOf("~") }
+    var initialPrompt by rememberSaveable { mutableStateOf("") }
     var showDirectoryPicker by remember { mutableStateOf(false) }
     val resolvedSessionName = if (mode == SessionLaunchMode.PI) {
         resolvePiSessionName(
@@ -1193,7 +1523,9 @@ private fun CreateSessionDialog(
         },
         title = { Text(if (mode == SessionLaunchMode.PI) "启动 Pi 工作区" else "新建 tmux 会话") },
         text = {
-            Column {
+            Column(
+                modifier = Modifier.heightIn(max = 560.dp).verticalScroll(rememberScrollState())
+            ) {
                 Row(
                     modifier = Modifier.fillMaxWidth().background(RaisedSurface, RoundedCornerShape(13.dp))
                         .padding(4.dp),
@@ -1292,6 +1624,22 @@ private fun CreateSessionDialog(
                         color = TextSecondary,
                         style = MaterialTheme.typography.labelSmall
                     )
+                    Spacer(Modifier.height(10.dp))
+                    AppTextField(
+                        value = initialPrompt,
+                        onValueChange = { initialPrompt = it.take(16_384) },
+                        label = "启动提示（可选）",
+                        placeholder = "/skill:example 任务内容",
+                        minLines = 2,
+                        maxLines = 5,
+                        textStyleMonospace = true
+                    )
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        "启动 Pi 后立即提交，支持普通 Prompt、/skill:name 和 Prompt 模板命令。",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall
+                    )
                     if (recentPiDirectories.isNotEmpty()) {
                         Spacer(Modifier.height(12.dp))
                         Text(
@@ -1301,11 +1649,8 @@ private fun CreateSessionDialog(
                             fontWeight = FontWeight.SemiBold
                         )
                         Spacer(Modifier.height(7.dp))
-                        LazyColumn(
-                            modifier = Modifier.fillMaxWidth().heightIn(max = 224.dp),
-                            verticalArrangement = Arrangement.spacedBy(7.dp)
-                        ) {
-                            items(recentPiDirectories, key = { it }) { path ->
+                        Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+                            recentPiDirectories.forEach { path ->
                                 val selectedPath = workingDirectory.trim().trimEnd('/').ifEmpty { "/" }
                                 val selected = path == selectedPath
                                 Surface(
@@ -1364,7 +1709,8 @@ private fun CreateSessionDialog(
                         name,
                         mode == SessionLaunchMode.PI,
                         workingDirectory.takeIf { mode == SessionLaunchMode.PI }?.trim().orEmpty(),
-                        mode == SessionLaunchMode.PI && launchWithoutSession
+                        mode == SessionLaunchMode.PI && launchWithoutSession,
+                        initialPrompt.takeIf { mode == SessionLaunchMode.PI }.orEmpty()
                     )
                 }
             ) {
