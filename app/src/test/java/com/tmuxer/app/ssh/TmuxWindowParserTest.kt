@@ -28,6 +28,21 @@ class TmuxWindowParserTest {
     }
 
     @Test
+    fun normalPiTaskUsesPersistentSession() {
+        val command = buildPiPaneCommand("env TERM=xterm-256color", launchWithoutSession = false)
+
+        assertTrue(command.contains("\"\$TMUXER_PI_BIN\" --tui-mode fullscreen"))
+        assertFalse(command.contains("--no-session"))
+    }
+
+    @Test
+    fun temporaryPiTaskDisablesSessionPersistence() {
+        val command = buildPiPaneCommand("env TERM=xterm-256color", launchWithoutSession = true)
+
+        assertTrue(command.contains("\"\$TMUXER_PI_BIN\" --no-session --tui-mode fullscreen"))
+    }
+
+    @Test
     fun piSessionCapturesInitialWindowIdWithoutAssumingBaseIndex() {
         val command = buildTmuxNewSessionCommand(
             sessionName = "team's work",

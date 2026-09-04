@@ -216,7 +216,8 @@ class SshManager(context: Context) {
     suspend fun createSession(
         name: String,
         launchPi: Boolean = false,
-        workingDirectory: String = ""
+        workingDirectory: String = "",
+        launchWithoutSession: Boolean = false
     ) = withContext(Dispatchers.IO) {
         val safeName = name.trim()
         require(safeName.isNotEmpty()) { "会话名不能为空" }
@@ -249,8 +250,7 @@ class SshManager(context: Context) {
             // rows). A temporary extension stores image tool results and inserts one OSC 8 link.
             val piEnvironment = "env TERM=xterm-256color COLORTERM=truecolor " +
                 "PATH=\"\$(dirname \"\$TMUXER_PI_BIN\"):\$PATH\""
-            val paneCommand = "sleep 1; exec $piEnvironment \"\$TMUXER_PI_BIN\" " +
-                "--tui-mode fullscreen -e \"\$TMUXER_IMAGE_EXTENSION\""
+            val paneCommand = buildPiPaneCommand(piEnvironment, launchWithoutSession)
             " && (tmux set-option -g extended-keys on 2>/dev/null || true; " +
                 "tmux set-option -g extended-keys-format csi-u 2>/dev/null || true; " +
                 "tmux show-options -gv terminal-features 2>/dev/null | " +
@@ -792,6 +792,15 @@ internal fun buildPiExecutableCheckCommand(): String =
         "PI_BIN=\$(\"\${SHELL:-/bin/sh}\" -lic 'command -v pi 2>/dev/null' " +
         "2>/dev/null | tail -n 1); fi; " +
         "if [ ! -x \"\$PI_BIN\" ]; then printf '__TMUXER_PI_MISSING__\\n'; exit 127; fi; "
+
+internal fun buildPiPaneCommand(
+    environment: String,
+    launchWithoutSession: Boolean
+): String {
+    val sessionOption = if (launchWithoutSession) " --no-session" else ""
+    return "sleep 1; exec $environment \"\$TMUXER_PI_BIN\"$sessionOption " +
+        "--tui-mode fullscreen -e \"\$TMUXER_IMAGE_EXTENSION\""
+}
 
 internal fun buildTmuxNewSessionCommand(
     sessionName: String,

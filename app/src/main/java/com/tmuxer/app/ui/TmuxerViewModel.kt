@@ -536,7 +536,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     fun createSession(
         name: String,
         launchPi: Boolean = false,
-        workingDirectory: String = ""
+        workingDirectory: String = "",
+        launchWithoutSession: Boolean = false
     ) {
         val profileId = currentProfile()?.id
         viewModelScope.launch {
@@ -553,7 +554,12 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                         existingSessionNames = _windows.value.map { it.sessionName }
                     )
                 }
-                sshManager.createSession(safeName, launchPi, workingDirectory)
+                sshManager.createSession(
+                    name = safeName,
+                    launchPi = launchPi,
+                    workingDirectory = workingDirectory,
+                    launchWithoutSession = launchWithoutSession
+                )
                 val latest = sshManager.listWindows()
                 _windows.value = latest
                 _dashboardMessage.value = null

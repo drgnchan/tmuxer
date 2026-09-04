@@ -852,7 +852,7 @@ private fun WindowDashboardScreen(
     onRefresh: () -> Unit,
     onRetry: () -> Unit,
     onWindow: (TmuxWindow) -> Unit,
-    onCreateSession: (String, Boolean, String) -> Unit,
+    onCreateSession: (String, Boolean, String, Boolean) -> Unit,
     onRemoveRecentPiDirectory: (String) -> Unit,
     onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
 ) {
@@ -964,9 +964,9 @@ private fun WindowDashboardScreen(
             recentPiDirectories = recentPiDirectories,
             existingSessionNames = existingSessionNames,
             onDismiss = { showCreateDialog = false },
-            onCreate = { name, launchPi, workingDirectory ->
+            onCreate = { name, launchPi, workingDirectory, launchWithoutSession ->
                 showCreateDialog = false
-                onCreateSession(name, launchPi, workingDirectory)
+                onCreateSession(name, launchPi, workingDirectory, launchWithoutSession)
             },
             onRemoveRecentPiDirectory = onRemoveRecentPiDirectory,
             onListRemoteDirectories = onListRemoteDirectories
@@ -1161,12 +1161,13 @@ private fun CreateSessionDialog(
     recentPiDirectories: List<String>,
     existingSessionNames: Set<String>,
     onDismiss: () -> Unit,
-    onCreate: (String, Boolean, String) -> Unit,
+    onCreate: (String, Boolean, String, Boolean) -> Unit,
     onRemoveRecentPiDirectory: (String) -> Unit,
     onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
 ) {
     var name by rememberSaveable { mutableStateOf("") }
     var mode by remember { mutableStateOf(SessionLaunchMode.SHELL) }
+    var launchWithoutSession by rememberSaveable { mutableStateOf(false) }
     var workingDirectory by rememberSaveable { mutableStateOf("~") }
     var showDirectoryPicker by remember { mutableStateOf(false) }
     val resolvedSessionName = if (mode == SessionLaunchMode.PI) {
@@ -1237,6 +1238,41 @@ private fun CreateSessionDialog(
                     style = MaterialTheme.typography.labelSmall
                 )
                 if (mode == SessionLaunchMode.PI) {
+                    Spacer(Modifier.height(12.dp))
+                    Text(
+                        "启动方式",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Spacer(Modifier.height(7.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth().background(RaisedSurface, RoundedCornerShape(13.dp))
+                            .padding(4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        SessionModeButton(
+                            label = "正常任务",
+                            icon = { Text("pi", fontFamily = FontFamily.Monospace) },
+                            selected = !launchWithoutSession,
+                            modifier = Modifier.weight(1f),
+                            onClick = { launchWithoutSession = false }
+                        )
+                        SessionModeButton(
+                            label = "临时任务",
+                            icon = { Text("pi", fontFamily = FontFamily.Monospace) },
+                            selected = launchWithoutSession,
+                            modifier = Modifier.weight(1f),
+                            onClick = { launchWithoutSession = true }
+                        )
+                    }
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        if (launchWithoutSession) "启动命令：pi --no-session" else "启动命令：pi",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall,
+                        fontFamily = FontFamily.Monospace
+                    )
                     Spacer(Modifier.height(10.dp))
                     AppTextField(
                         value = workingDirectory,
@@ -1327,7 +1363,8 @@ private fun CreateSessionDialog(
                     onCreate(
                         name,
                         mode == SessionLaunchMode.PI,
-                        workingDirectory.takeIf { mode == SessionLaunchMode.PI }?.trim().orEmpty()
+                        workingDirectory.takeIf { mode == SessionLaunchMode.PI }?.trim().orEmpty(),
+                        mode == SessionLaunchMode.PI && launchWithoutSession
                     )
                 }
             ) {
