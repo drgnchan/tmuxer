@@ -1509,10 +1509,9 @@ private fun PiWorkingDirectoryDropdown(
     val savedDefaultDirectory = defaultDirectory.ifBlank { "~" }
     val directoryOptions = remember(selectedDirectory, recentDirectories, savedDefaultDirectory) {
         buildList {
-            add(selectedDirectory)
-            add(savedDefaultDirectory)
-            if ("~" !in this) add("~")
-            recentDirectories.forEach { if (it !in this) add(it) }
+            (listOf(savedDefaultDirectory, "~") + recentDirectories).forEach { path ->
+                if (path != selectedDirectory && path !in this) add(path)
+            }
         }
     }
 
@@ -1546,16 +1545,23 @@ private fun PiWorkingDirectoryDropdown(
                         overflow = TextOverflow.StartEllipsis,
                         modifier = Modifier.weight(1f)
                     )
-                    if (selectedDirectory == savedDefaultDirectory) {
-                        Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(4.dp))
+                    IconButton(
+                        onClick = {
+                            onSetDefault(selectedDirectory)
+                            expanded = false
+                        },
+                        modifier = Modifier.size(34.dp)
+                    ) {
+                        val isDefault = selectedDirectory == savedDefaultDirectory
                         Icon(
-                            Icons.Rounded.Star,
-                            "默认工作目录",
-                            tint = Amber,
+                            if (isDefault) Icons.Rounded.Star else Icons.Rounded.StarBorder,
+                            if (isDefault) "当前默认目录" else "将当前目录设为默认",
+                            tint = if (isDefault) Amber else TextSecondary,
                             modifier = Modifier.size(18.dp)
                         )
                     }
-                    Spacer(Modifier.width(8.dp))
+                    Spacer(Modifier.width(4.dp))
                     Icon(
                         if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
                         if (expanded) "收起工作目录" else "展开工作目录",
