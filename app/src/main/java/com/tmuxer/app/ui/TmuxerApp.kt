@@ -1486,6 +1486,134 @@ private fun InlineMessage(message: String) {
 private enum class SessionLaunchMode { SHELL, PI }
 
 @Composable
+private fun PiWorkingDirectoryDropdown(
+    value: String,
+    recentDirectories: List<String>,
+    onSelect: (String) -> Unit,
+    onBrowse: () -> Unit,
+    onRemoveRecentDirectory: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selectedDirectory = value.ifBlank { "~" }
+    val directoryOptions = remember(selectedDirectory, recentDirectories) {
+        buildList {
+            add(selectedDirectory)
+            if (selectedDirectory != "~") add("~")
+            recentDirectories.forEach { if (it !in this) add(it) }
+        }
+    }
+
+    Column {
+        Text(
+            "工作目录",
+            color = TextSecondary,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+        Spacer(Modifier.height(7.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = DeepSurface,
+            shape = RoundedCornerShape(14.dp),
+            border = BorderStroke(1.dp, if (expanded) Mint else Outline)
+        ) {
+            Column {
+                Row(
+                    modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }
+                        .padding(horizontal = 14.dp, vertical = 14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Rounded.FolderOpen, null, tint = Mint, modifier = Modifier.size(19.dp))
+                    Spacer(Modifier.width(9.dp))
+                    Text(
+                        selectedDirectory,
+                        fontFamily = FontFamily.Monospace,
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.StartEllipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Icon(
+                        if (expanded) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                        if (expanded) "收起工作目录" else "展开工作目录",
+                        tint = TextSecondary
+                    )
+                }
+                AnimatedVisibility(visible = expanded) {
+                    Column {
+                        HorizontalDivider(color = Outline.copy(alpha = 0.7f))
+                        directoryOptions.forEach { path ->
+                            val selected = path == selectedDirectory
+                            Row(
+                                modifier = Modifier.fillMaxWidth().clickable {
+                                    onSelect(path)
+                                    expanded = false
+                                }.padding(start = 14.dp, end = 5.dp, top = 6.dp, bottom = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    if (selected) Icons.Rounded.CheckCircle else Icons.Rounded.FolderOpen,
+                                    null,
+                                    tint = if (selected) Mint else TextSecondary,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                                Spacer(Modifier.width(9.dp))
+                                Text(
+                                    path,
+                                    fontFamily = FontFamily.Monospace,
+                                    style = MaterialTheme.typography.labelMedium,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.StartEllipsis,
+                                    modifier = Modifier.weight(1f)
+                                )
+                                if (path in recentDirectories) {
+                                    IconButton(
+                                        onClick = { onRemoveRecentDirectory(path) },
+                                        modifier = Modifier.size(34.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Rounded.Delete,
+                                            "删除打开记录：$path",
+                                            tint = TextSecondary,
+                                            modifier = Modifier.size(17.dp)
+                                        )
+                                    }
+                                } else {
+                                    Spacer(Modifier.width(34.dp))
+                                }
+                            }
+                        }
+                        HorizontalDivider(color = Outline.copy(alpha = 0.7f))
+                        Row(
+                            modifier = Modifier.fillMaxWidth().clickable {
+                                expanded = false
+                                onBrowse()
+                            }.padding(horizontal = 14.dp, vertical = 12.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                Icons.Rounded.FolderOpen,
+                                null,
+                                tint = Mint,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(Modifier.width(9.dp))
+                            Text(
+                                "浏览远程目录…",
+                                color = Mint,
+                                style = MaterialTheme.typography.labelMedium,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun CreateSessionDialog(
     recentPiDirectories: List<String>,
     existingSessionNames: Set<String>,
@@ -1556,19 +1684,6 @@ private fun CreateSessionDialog(
                     color = TextSecondary,
                     style = MaterialTheme.typography.bodySmall
                 )
-                Spacer(Modifier.height(12.dp))
-                AppTextField(
-                    value = name,
-                    onValueChange = { name = it.replace(' ', '-').take(40) },
-                    label = "会话名称（可选）",
-                    placeholder = "自动：$resolvedSessionName"
-                )
-                Spacer(Modifier.height(5.dp))
-                Text(
-                    "将使用会话名称：$resolvedSessionName",
-                    color = TextSecondary,
-                    style = MaterialTheme.typography.labelSmall
-                )
                 if (mode == SessionLaunchMode.PI) {
                     Spacer(Modifier.height(12.dp))
                     Text(
@@ -1606,21 +1721,23 @@ private fun CreateSessionDialog(
                         fontFamily = FontFamily.Monospace
                     )
                     Spacer(Modifier.height(10.dp))
-                    AppTextField(
+                    PiWorkingDirectoryDropdown(
                         value = workingDirectory,
-                        onValueChange = { workingDirectory = it.take(512) },
-                        label = "工作目录",
-                        placeholder = "~",
-                        trailing = {
-                            IconButton(onClick = { showDirectoryPicker = true }) {
-                                Icon(Icons.Rounded.FolderOpen, "选择远程工作目录")
-                            }
-                        },
-                        textStyleMonospace = true
+                        recentDirectories = recentPiDirectories,
+                        onSelect = { workingDirectory = it },
+                        onBrowse = { showDirectoryPicker = true },
+                        onRemoveRecentDirectory = onRemoveRecentPiDirectory
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    AppTextField(
+                        value = name,
+                        onValueChange = { name = it.replace(' ', '-').take(40) },
+                        label = "会话名称（可选）",
+                        placeholder = "自动：$resolvedSessionName"
                     )
                     Spacer(Modifier.height(5.dp))
                     Text(
-                        "可直接填写，或点击文件夹浏览远程目录",
+                        "将使用会话名称：$resolvedSessionName",
                         color = TextSecondary,
                         style = MaterialTheme.typography.labelSmall
                     )
@@ -1640,65 +1757,20 @@ private fun CreateSessionDialog(
                         color = TextSecondary,
                         style = MaterialTheme.typography.labelSmall
                     )
-                    if (recentPiDirectories.isNotEmpty()) {
-                        Spacer(Modifier.height(12.dp))
-                        Text(
-                            "最近打开",
-                            color = TextSecondary,
-                            style = MaterialTheme.typography.labelMedium,
-                            fontWeight = FontWeight.SemiBold
-                        )
-                        Spacer(Modifier.height(7.dp))
-                        Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                            recentPiDirectories.forEach { path ->
-                                val selectedPath = workingDirectory.trim().trimEnd('/').ifEmpty { "/" }
-                                val selected = path == selectedPath
-                                Surface(
-                                    modifier = Modifier.fillMaxWidth().clickable {
-                                        workingDirectory = path
-                                    },
-                                    color = if (selected) Mint.copy(alpha = 0.14f) else DeepSurface,
-                                    shape = RoundedCornerShape(10.dp),
-                                    border = BorderStroke(
-                                        1.dp,
-                                        if (selected) Mint else Outline.copy(alpha = 0.75f)
-                                    )
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            Icons.Rounded.FolderOpen,
-                                            null,
-                                            tint = Mint,
-                                            modifier = Modifier.size(16.dp)
-                                        )
-                                        Spacer(Modifier.width(7.dp))
-                                        Text(
-                                            path,
-                                            maxLines = 1,
-                                            overflow = TextOverflow.StartEllipsis,
-                                            fontFamily = FontFamily.Monospace,
-                                            style = MaterialTheme.typography.labelMedium,
-                                            modifier = Modifier.weight(1f)
-                                        )
-                                        IconButton(
-                                            onClick = { onRemoveRecentPiDirectory(path) },
-                                            modifier = Modifier.size(32.dp)
-                                        ) {
-                                            Icon(
-                                                Icons.Rounded.Delete,
-                                                "删除打开记录：$path",
-                                                tint = TextSecondary,
-                                                modifier = Modifier.size(17.dp)
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                } else {
+                    Spacer(Modifier.height(12.dp))
+                    AppTextField(
+                        value = name,
+                        onValueChange = { name = it.replace(' ', '-').take(40) },
+                        label = "会话名称（可选）",
+                        placeholder = "自动：$resolvedSessionName"
+                    )
+                    Spacer(Modifier.height(5.dp))
+                    Text(
+                        "将使用会话名称：$resolvedSessionName",
+                        color = TextSecondary,
+                        style = MaterialTheme.typography.labelSmall
+                    )
                 }
             }
         },
