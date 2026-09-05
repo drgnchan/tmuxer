@@ -176,6 +176,45 @@ class TerminalEmulatorTest {
     }
 
     @Test
+    fun sendsPrimaryPressAndReleaseForAllSupportedMouseTrackingModes() {
+        for (mode in listOf(1000, 1002, 1003)) {
+            val replies = mutableListOf<String>()
+            val terminal = TerminalEmulator(20, 5, replies::add)
+            terminal.feed("\u001B[?${mode}h\u001B[?1006h".toByteArray())
+            terminal.click(column = 4, row = 3)
+            assertEquals(listOf("\u001B[<0;4;3M\u001B[<0;4;3m"), replies)
+        }
+    }
+
+    @Test
+    fun ignoresClicksWithoutMouseTrackingOrAfterItIsDisabled() {
+        val replies = mutableListOf<String>()
+        val terminal = TerminalEmulator(20, 5, replies::add)
+        terminal.click(4, 3)
+        terminal.feed("\u001B[?1000h\u001B[?1000l".toByteArray())
+        terminal.click(4, 3)
+        assertTrue(replies.isEmpty())
+    }
+
+    @Test
+    fun clampsMouseClickCoordinatesToScreen() {
+        val replies = mutableListOf<String>()
+        val terminal = TerminalEmulator(20, 5, replies::add)
+        terminal.feed("\u001B[?1000h\u001B[?1006h".toByteArray())
+        terminal.click(-2, 99)
+        assertEquals("\u001B[<0;1;5M\u001B[<0;1;5m", replies.single())
+    }
+
+    @Test
+    fun supportsLegacyMouseClickProtocol() {
+        val replies = mutableListOf<String>()
+        val terminal = TerminalEmulator(20, 5, replies::add)
+        terminal.feed("\u001B[?1000h".toByteArray())
+        terminal.click(4, 3)
+        assertEquals("\u001B[M $#\u001B[M#$#", replies.single())
+    }
+
+    @Test
     fun tracksBracketedPasteModeRequestedByPi() {
         val terminal = TerminalEmulator(20, 5)
         assertFalse(terminal.isBracketedPasteModeEnabled())

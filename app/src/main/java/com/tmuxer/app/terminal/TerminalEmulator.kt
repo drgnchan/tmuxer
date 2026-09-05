@@ -356,6 +356,23 @@ class TerminalEmulator(
     @Synchronized
     fun isMouseTrackingActive(): Boolean = mouseTracking
 
+    /** Send a complete primary-button click only to a mouse-aware live screen. */
+    fun click(column: Int, row: Int) {
+        val response = synchronized(this) {
+            if (!mouseTracking || viewportOffset != 0) return
+            val x = column.coerceIn(1, columns)
+            val y = row.coerceIn(1, rows)
+            if (sgrMouseProtocol) {
+                "\u001B[<0;$x;${y}M\u001B[<0;$x;${y}m"
+            } else {
+                // Legacy X10 coordinates cannot represent cells beyond 223.
+                val coordinates = "${(32 + x.coerceAtMost(223)).toChar()}${(32 + y.coerceAtMost(223)).toChar()}"
+                "\u001B[M $coordinates\u001B[M#$coordinates"
+            }
+        }
+        reply(response)
+    }
+
     @Synchronized
     fun isBracketedPasteModeEnabled(): Boolean = bracketedPasteMode
 

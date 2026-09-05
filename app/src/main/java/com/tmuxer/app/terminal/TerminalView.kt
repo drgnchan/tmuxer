@@ -949,6 +949,12 @@ class TerminalView @JvmOverloads constructor(
                             lastTapTime = event.eventTime
                             lastTapX = event.x
                             lastTapY = event.y
+                            // Only completed taps reach the app: drags and long presses remain
+                            // local gestures, and the second tap still opens the keyboard.
+                            emulator?.click(
+                                column = floor((event.x - horizontalPadding) / characterWidth).toInt() + 1,
+                                row = floor((event.y - verticalPadding) / lineHeight).toInt() + 1
+                            )
                         }
                     }
                 }
