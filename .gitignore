@@ -12,3 +12,7 @@ artifacts/
 dogfood-output/
 .externalNativeBuild/
 .cxx/
+
+# 私有开发笔记与设计稿（不公开）
+AGENTS.md
+design-mockups/

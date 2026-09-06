@@ -44,3 +44,9 @@ app/build/outputs/apk/debug/app-debug.apk
 ```bash
 ./gradlew :app:testDebugUnitTest :app:lintDebug
 ```
+
+## 许可证
+
+本项目基于 [MIT License](LICENSE) 开源。
+
+终端渲染器参考了开源的 [Termux](https://github.com/termux/termux-app)（GPL-3.0）实现思路，但未包含其任何源码或二进制。应用内置 **Ubuntu Mono Regular** 字体，遵循 Ubuntu Font Licence 1.0，详见 [OPEN_SOURCE_NOTICES.md](OPEN_SOURCE_NOTICES.md)。
