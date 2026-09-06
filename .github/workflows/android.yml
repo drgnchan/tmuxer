@@ -25,9 +25,15 @@ jobs:
       - name: Set up Android SDK
         shell: bash
         run: |
-          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          set -x
+          ls "$ANDROID_HOME/cmdline-tools"
+          SM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SM" ]; then
+            SM="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f -perm -111 | head -1)"
+          fi
+          echo "sdkmanager=$SM"
+          yes | "$SM" --licenses || true
+          yes | "$SM" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -78,9 +84,15 @@ jobs:
       - name: Set up Android SDK
         shell: bash
         run: |
-          echo "$ANDROID_HOME/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0" > /dev/null
+          set -x
+          ls "$ANDROID_HOME/cmdline-tools"
+          SM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SM" ]; then
+            SM="$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f -perm -111 | head -1)"
+          fi
+          echo "sdkmanager=$SM"
+          yes | "$SM" --licenses || true
+          yes | "$SM" "platforms;android-36" "build-tools;36.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
