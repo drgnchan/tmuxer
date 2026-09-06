@@ -2513,6 +2513,7 @@ private fun SpecialKeyBar(
                 KeyButton("^J", description = "插入换行", compact = true) { onKey("\u000A") }
                 KeyButton("^T", description = "展开或折叠思考内容", compact = true) { onKey("\u0014") }
                 KeyButton("^O", description = "展开或折叠工具输出", compact = true) { onKey("\u000F") }
+                KeyButton("^P", description = "Ctrl+P", compact = true) { onKey("\u0010") }
                 ShiftTabButton { onKey("\u001B[Z") }
             } else {
                 KeyButton("Esc", description = "Escape") { onKey("\u001B") }
@@ -2521,6 +2522,7 @@ private fun SpecialKeyBar(
                 KeyButton("Alt", active = altActive, onClick = onAlt)
                 KeyButton("Tab") { onKey("\t") }
                 ShiftTabButton { onKey("\u001B[Z") }
+                KeyButton("^P", description = "Ctrl+P") { onKey("\u0010") }
                 KeyButton("/", description = "输入斜杠") { onKey("/") }
                 KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowUp, description = "向上翻页") {
                     onKey("\u001B[5~")
