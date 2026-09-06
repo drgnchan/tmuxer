@@ -1,5 +1,7 @@
 # tmuxer
 
+[![Build](https://github.com/drgnchan/tmuxer/actions/workflows/android.yml/badge.svg)](https://github.com/drgnchan/tmuxer/actions/workflows/android.yml)
+
 一个通过 SSH 管理远程 tmux 会话的 Android 客户端，也可以直接创建和使用 Pi 工作区。
 
 ## 主要功能
