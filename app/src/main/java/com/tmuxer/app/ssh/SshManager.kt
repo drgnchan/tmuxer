@@ -496,7 +496,7 @@ class SshManager(context: Context) {
                 // underscores even though the session stores Unicode correctly.
                 "export LANG=C.UTF-8 LC_ALL=C.UTF-8; " +
                     "tmux select-window -t ${shellQuote(windowId)} && " +
-                    "exec tmux attach-session -t ${shellQuote(sessionId)}"
+                    buildTmuxAttachCommand(sessionId)
             )
         )
         val input = channel.inputStream
@@ -874,6 +874,10 @@ internal fun withRemoteExecutablePath(command: String): String =
         "\$HOME/.asdf/shims:\$HOME/.nix-profile/bin:/opt/homebrew/bin:/usr/local/bin:" +
         "/opt/local/bin:/home/linuxbrew/.linuxbrew/bin:/run/current-system/sw/bin:" +
         "/nix/var/nix/profiles/default/bin\"; $command"
+
+/** Advertise OSC 8 on every attachment, including existing sessions on fresh servers. */
+internal fun buildTmuxAttachCommand(sessionId: String): String =
+    "exec tmux -T hyperlinks attach-session -t ${shellQuote(sessionId)}"
 
 internal fun buildPiExecutableCheckCommand(): String =
     "PI_BIN=\$(command -v pi 2>/dev/null || true); " +

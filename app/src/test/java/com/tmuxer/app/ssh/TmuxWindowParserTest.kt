@@ -8,6 +8,18 @@ import org.junit.Test
 
 class TmuxWindowParserTest {
     @Test
+    fun everyTerminalAttachmentAdvertisesHyperlinksWithoutGlobalConfiguration() {
+        assertEquals(
+            "exec tmux -T hyperlinks attach-session -t '\$3'",
+            buildTmuxAttachCommand("\$3")
+        )
+        assertEquals(
+            "exec tmux -T hyperlinks attach-session -t 'a'\"'\"'b'",
+            buildTmuxAttachCommand("a'b")
+        )
+    }
+
+    @Test
     fun remoteCommandsIncludeCommonNonLoginShellExecutablePaths() {
         val command = withRemoteExecutablePath("command -v tmux")
 
