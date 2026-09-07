@@ -900,7 +900,9 @@ internal fun buildPiPaneCommand(
     val promptArgument = initialPrompt.trim().takeIf { it.isNotEmpty() }
         ?.let { " -- ${shellQuote(it)}" }
         .orEmpty()
-    return "sleep 1; exec $environment \"\$TMUXER_PI_BIN\"$sessionOption " +
+    // Pi can start before the terminal attaches, or probe our capability-less control client.
+    // Its detection is cached; declare our verified OSC 8 support before Pi starts instead.
+    return "sleep 1; export PI_HYPERLINKS=1; exec $environment \"\$TMUXER_PI_BIN\"$sessionOption " +
         "--tui-mode fullscreen -e \"\$TMUXER_IMAGE_EXTENSION\"$promptArgument"
 }
 

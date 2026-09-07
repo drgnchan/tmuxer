@@ -40,6 +40,14 @@ class TmuxWindowParserTest {
     }
 
     @Test
+    fun piLaunchDeclaresHyperlinksBeforeStartingEvenWithoutAnAttachedClient() {
+        for (temporary in listOf(false, true)) {
+            val command = buildPiPaneCommand("env TERM=xterm-256color", temporary)
+            assertTrue(command.startsWith("sleep 1; export PI_HYPERLINKS=1; exec "))
+        }
+    }
+
+    @Test
     fun normalPiTaskUsesPersistentSession() {
         val command = buildPiPaneCommand("env TERM=xterm-256color", launchWithoutSession = false)
 
