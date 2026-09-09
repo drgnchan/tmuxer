@@ -56,6 +56,26 @@ class QuickLaunchPresetStoreTest {
     }
 
     @Test
+    fun modelAndThinkingDefaultsKeepOldPresetsCompatible() {
+        val preset = normalizeQuickLaunchPreset(QuickLaunchPreset(title = "old", promptTemplate = ""))!!
+        assertEquals("", preset.model)
+        assertEquals("", preset.thinkingEffort)
+    }
+
+    @Test
+    fun normalizesModelAndValidatesThinkingEffort() {
+        val preset = QuickLaunchPreset(title = "task", promptTemplate = "", model = "  provider/model  ")
+        for (effort in PI_THINKING_EFFORTS) {
+            val normalized = normalizeQuickLaunchPreset(preset.copy(thinkingEffort = " $effort "))!!
+            assertEquals("provider/model", normalized.model)
+            assertEquals(effort, normalized.thinkingEffort)
+        }
+        assertEquals("", normalizeQuickLaunchPreset(preset.copy(thinkingEffort = "invalid"))!!.thinkingEffort)
+        assertEquals(512, normalizeQuickLaunchPreset(preset.copy(model = "x".repeat(600)))!!.model.length)
+        assertEquals("ab", normalizeQuickLaunchPreset(preset.copy(model = "a\u0000b"))!!.model)
+    }
+
+    @Test
     fun rejectsBlankTitle() {
         assertNull(normalizeQuickLaunchPreset(QuickLaunchPreset(title = " ", promptTemplate = "prompt")))
     }

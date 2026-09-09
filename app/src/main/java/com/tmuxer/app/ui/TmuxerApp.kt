@@ -98,6 +98,7 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedTextField
@@ -244,7 +245,9 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     onRefresh = viewModel::refreshWindows,
                     onRetry = viewModel::retryConnection,
                     onWindow = viewModel::openWindow,
-                    onCreateSession = viewModel::createSession,
+                    onCreateSession = { name, launchPi, directory, temporary, prompt ->
+                        viewModel.createSession(name, launchPi, directory, temporary, prompt)
+                    },
                     onRemoveRecentPiDirectory = viewModel::removeRecentPiDirectory,
                     onSetDefaultPiDirectory = viewModel::setDefaultPiDirectory,
                     onSaveQuickLaunchPreset = viewModel::saveQuickLaunchPreset,
@@ -1146,6 +1149,9 @@ private fun QuickLaunchPresetEditor(
         mutableStateOf(preset?.launchWithoutSession ?: false)
     }
     var sessionName by rememberSaveable(preset?.id) { mutableStateOf(preset?.sessionName.orEmpty()) }
+    var model by rememberSaveable(preset?.id) { mutableStateOf(preset?.model.orEmpty()) }
+    var thinkingEffort by rememberSaveable(preset?.id) { mutableStateOf(preset?.thinkingEffort.orEmpty()) }
+    var showThinkingMenu by remember { mutableStateOf(false) }
     var showDirectoryPicker by remember { mutableStateOf(false) }
 
     AlertDialog(
@@ -1192,6 +1198,38 @@ private fun QuickLaunchPresetEditor(
                     textStyleMonospace = true
                 )
                 Spacer(Modifier.height(10.dp))
+                AppTextField(
+                    value = model,
+                    onValueChange = { model = it.take(512) },
+                    label = "模型（可选）",
+                    placeholder = "provider/model；留空沿用 Pi 默认",
+                    textStyleMonospace = true
+                )
+                Spacer(Modifier.height(10.dp))
+                Text("Thinking effort", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                Box {
+                    OutlinedButton(onClick = { showThinkingMenu = true }, modifier = Modifier.fillMaxWidth()) {
+                        Text(thinkingEffort.ifEmpty { "默认（沿用 Pi 配置）" })
+                        Icon(Icons.Rounded.ArrowDropDown, null)
+                    }
+                    androidx.compose.material3.DropdownMenu(
+                        expanded = showThinkingMenu,
+                        onDismissRequest = { showThinkingMenu = false }
+                    ) {
+                        (listOf("") + com.tmuxer.app.data.PI_THINKING_EFFORTS).forEach { effort ->
+                            androidx.compose.material3.DropdownMenuItem(
+                                text = { Text(effort.ifEmpty { "默认（沿用 Pi 配置）" }) },
+                                onClick = {
+                                    thinkingEffort = effort
+                                    showThinkingMenu = false
+                                }
+                            )
+                        }
+                    }
+                }
+                Text("支持的思考档位取决于模型和远程 Pi 版本。", color = TextSecondary,
+                    style = MaterialTheme.typography.labelSmall)
+                Spacer(Modifier.height(10.dp))
                 Text("启动方式", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
                 Spacer(Modifier.height(6.dp))
                 Row(
@@ -1234,7 +1272,9 @@ private fun QuickLaunchPresetEditor(
                             promptTemplate = promptTemplate,
                             workingDirectory = workingDirectory,
                             launchWithoutSession = launchWithoutSession,
-                            sessionName = sessionName
+                            sessionName = sessionName,
+                            model = model,
+                            thinkingEffort = thinkingEffort
                         )
                     )
                 }

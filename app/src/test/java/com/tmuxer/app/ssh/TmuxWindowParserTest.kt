@@ -86,6 +86,51 @@ class TmuxWindowParserTest {
     }
 
     @Test
+    fun modelAndThinkingAreQuotedBeforePromptForBothSessionModes() {
+        for (temporary in listOf(false, true)) {
+            val command = buildPiPaneCommand(
+                environment = "env TERM=xterm-256color",
+                launchWithoutSession = temporary,
+                model = " provider/user's-$(touch nope) ",
+                thinkingEffort = " high ",
+                initialPrompt = "--thinking off"
+            )
+            assertTrue(command.endsWith(" --model 'provider/user'\"'\"'s-$(touch nope)' --thinking 'high' -- '--thinking off'"))
+            assertEquals(temporary, command.contains(" --no-session"))
+        }
+    }
+
+    @Test
+    fun blankModelOptionsPreserveExistingCommand() {
+        assertEquals(
+            buildPiPaneCommand("env", false),
+            buildPiPaneCommand("env", false, model = "  ", thinkingEffort = "  ")
+        )
+    }
+
+    @Test
+    fun modelAndThinkingCanBeConfiguredIndependently() {
+        val modelOnly = buildPiPaneCommand("env", false, model = "provider/model")
+        assertTrue(modelOnly.endsWith(" --model 'provider/model'"))
+        assertFalse(modelOnly.contains("--thinking"))
+        for (effort in com.tmuxer.app.data.PI_THINKING_EFFORTS) {
+            val thinkingOnly = buildPiPaneCommand("env", false, thinkingEffort = effort)
+            assertTrue(thinkingOnly.endsWith(" --thinking '$effort'"))
+            assertFalse(thinkingOnly.contains("--model"))
+        }
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsInvalidThinkingEffort() {
+        buildPiPaneCommand("env", false, thinkingEffort = "high; touch nope")
+    }
+
+    @Test(expected = IllegalArgumentException::class)
+    fun rejectsNullInModel() {
+        buildPiPaneCommand("env", false, model = "bad\u0000model")
+    }
+
+    @Test
     fun piSessionCapturesInitialWindowIdWithoutAssumingBaseIndex() {
         val command = buildTmuxNewSessionCommand(
             sessionName = "team's work",

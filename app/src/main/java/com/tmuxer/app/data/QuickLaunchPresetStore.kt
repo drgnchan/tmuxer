@@ -23,7 +23,9 @@ class QuickLaunchPresetStore(context: Context) {
                             promptTemplate = item.optString("promptTemplate"),
                             workingDirectory = item.optString("workingDirectory", "~"),
                             launchWithoutSession = item.optBoolean("launchWithoutSession"),
-                            sessionName = item.optString("sessionName")
+                            sessionName = item.optString("sessionName"),
+                            model = item.optString("model"),
+                            thinkingEffort = item.optString("thinkingEffort")
                         )
                     ) ?: continue
                     if (none { it.id == preset.id }) add(preset)
@@ -75,6 +77,8 @@ class QuickLaunchPresetStore(context: Context) {
                     .put("workingDirectory", preset.workingDirectory)
                     .put("launchWithoutSession", preset.launchWithoutSession)
                     .put("sessionName", preset.sessionName)
+                    .put("model", preset.model)
+                    .put("thinkingEffort", preset.thinkingEffort)
             )
         }
         preferences.edit().putString(profileId, array.toString()).apply()
@@ -97,7 +101,9 @@ internal fun normalizeQuickLaunchPreset(preset: QuickLaunchPreset): QuickLaunchP
         title = title,
         promptTemplate = preset.promptTemplate.trim().take(16_384),
         workingDirectory = preset.workingDirectory.trim().ifEmpty { "~" }.take(512),
-        sessionName = preset.sessionName.trim().take(40)
+        sessionName = preset.sessionName.trim().take(40),
+        model = preset.model.trim().replace("\u0000", "").take(512),
+        thinkingEffort = preset.thinkingEffort.trim().takeIf { it in PI_THINKING_EFFORTS }.orEmpty()
     )
 }
 

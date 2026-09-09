@@ -561,7 +561,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         launchPi: Boolean = false,
         workingDirectory: String = "",
         launchWithoutSession: Boolean = false,
-        initialPrompt: String = ""
+        initialPrompt: String = "",
+        model: String = "",
+        thinkingEffort: String = ""
     ) {
         val profileId = currentProfile()?.id
         viewModelScope.launch {
@@ -583,7 +585,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                     launchPi = launchPi,
                     workingDirectory = workingDirectory,
                     launchWithoutSession = launchWithoutSession,
-                    initialPrompt = initialPrompt
+                    initialPrompt = initialPrompt,
+                    model = model,
+                    thinkingEffort = thinkingEffort
                 )
                 val latest = sshManager.listWindows()
                 _windows.value = latest
@@ -644,7 +648,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             launchPi = true,
             workingDirectory = preset.workingDirectory,
             launchWithoutSession = preset.launchWithoutSession,
-            initialPrompt = buildQuickLaunchPrompt(preset.promptTemplate, input)
+            initialPrompt = buildQuickLaunchPrompt(preset.promptTemplate, input),
+            model = preset.model,
+            thinkingEffort = preset.thinkingEffort
         )
     }
 

@@ -229,7 +229,9 @@ class SshManager(context: Context) {
         launchPi: Boolean = false,
         workingDirectory: String = "",
         launchWithoutSession: Boolean = false,
-        initialPrompt: String = ""
+        initialPrompt: String = "",
+        model: String = "",
+        thinkingEffort: String = ""
     ) = withContext(Dispatchers.IO) {
         val safeName = name.trim()
         require(safeName.isNotEmpty()) { "会话名不能为空" }
@@ -267,7 +269,9 @@ class SshManager(context: Context) {
             val paneCommand = buildPiPaneCommand(
                 environment = piEnvironment,
                 launchWithoutSession = launchWithoutSession,
-                initialPrompt = initialPrompt
+                initialPrompt = initialPrompt,
+                model = model,
+                thinkingEffort = thinkingEffort
             )
             " && (tmux set-option -g extended-keys on 2>/dev/null || true; " +
                 "tmux set-option -g extended-keys-format csi-u 2>/dev/null || true; " +
@@ -894,8 +898,17 @@ internal const val MAX_INITIAL_PI_PROMPT_LENGTH = 16_384
 internal fun buildPiPaneCommand(
     environment: String,
     launchWithoutSession: Boolean,
-    initialPrompt: String = ""
+    initialPrompt: String = "",
+    model: String = "",
+    thinkingEffort: String = ""
 ): String {
+    require(model.length <= 512 && '\u0000' !in model) { "模型名称无效" }
+    val effort = thinkingEffort.trim()
+    require(effort.isEmpty() || effort in com.tmuxer.app.data.PI_THINKING_EFFORTS) { "Thinking effort 无效" }
+    val modelOptions = buildString {
+        if (model.isNotBlank()) append(" --model ").append(shellQuote(model.trim()))
+        if (effort.isNotEmpty()) append(" --thinking ").append(shellQuote(effort))
+    }
     val sessionOption = if (launchWithoutSession) " --no-session" else ""
     val promptArgument = initialPrompt.trim().takeIf { it.isNotEmpty() }
         ?.let { " -- ${shellQuote(it)}" }
@@ -903,7 +916,7 @@ internal fun buildPiPaneCommand(
     // Pi can start before the terminal attaches, or probe our capability-less control client.
     // Its detection is cached; declare our verified OSC 8 support before Pi starts instead.
     return "sleep 1; export PI_HYPERLINKS=1; exec $environment \"\$TMUXER_PI_BIN\"$sessionOption " +
-        "--tui-mode fullscreen -e \"\$TMUXER_IMAGE_EXTENSION\"$promptArgument"
+        "--tui-mode fullscreen -e \"\$TMUXER_IMAGE_EXTENSION\"$modelOptions$promptArgument"
 }
 
 internal fun buildTmuxNewSessionCommand(

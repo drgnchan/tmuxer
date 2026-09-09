@@ -26,8 +26,12 @@ data class QuickLaunchPreset(
     val promptTemplate: String,
     val workingDirectory: String = "~",
     val launchWithoutSession: Boolean = false,
-    val sessionName: String = ""
+    val sessionName: String = "",
+    val model: String = "",
+    val thinkingEffort: String = ""
 )
+
+internal val PI_THINKING_EFFORTS = listOf("off", "minimal", "low", "medium", "high", "xhigh", "max")
 
 data class TmuxWindow(
     val sessionName: String,
