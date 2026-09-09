@@ -157,6 +157,7 @@ import com.tmuxer.app.data.SshProfile
 import com.tmuxer.app.data.buildQuickLaunchPrompt
 import com.tmuxer.app.data.TmuxWindow
 import com.tmuxer.app.ssh.RemoteDirectoryListing
+import com.tmuxer.app.ssh.RemotePiModel
 import com.tmuxer.app.terminal.TerminalImageOpenRequest
 import com.tmuxer.app.terminal.TerminalImagePreview
 import com.tmuxer.app.terminal.TerminalTheme
@@ -253,7 +254,8 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     onSaveQuickLaunchPreset = viewModel::saveQuickLaunchPreset,
                     onRemoveQuickLaunchPreset = viewModel::removeQuickLaunchPreset,
                     onLaunchQuickTask = viewModel::launchQuickTask,
-                    onListRemoteDirectories = viewModel::listRemoteDirectories
+                    onListRemoteDirectories = viewModel::listRemoteDirectories,
+                    onListPiModels = viewModel::listPiModels
                 )
                 AppScreen.Terminal -> TerminalScreen(
                     selected = selectedWindow,
@@ -876,7 +878,8 @@ private fun WindowDashboardScreen(
     onSaveQuickLaunchPreset: (QuickLaunchPreset) -> Unit,
     onRemoveQuickLaunchPreset: (String) -> Unit,
     onLaunchQuickTask: (QuickLaunchPreset, String) -> Unit,
-    onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
+    onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing,
+    onListPiModels: suspend (String, Boolean) -> List<RemotePiModel>
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
     var editingQuickPreset by remember { mutableStateOf<QuickLaunchPreset?>(null) }
@@ -1022,7 +1025,8 @@ private fun WindowDashboardScreen(
                 showNewQuickPreset = false
                 editingQuickPreset = null
             },
-            onListRemoteDirectories = onListRemoteDirectories
+            onListRemoteDirectories = onListRemoteDirectories,
+            onListPiModels = onListPiModels
         )
     }
 
@@ -1138,7 +1142,8 @@ private fun QuickLaunchPresetEditor(
     preset: QuickLaunchPreset?,
     onDismiss: () -> Unit,
     onSave: (QuickLaunchPreset) -> Unit,
-    onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
+    onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing,
+    onListPiModels: suspend (String, Boolean) -> List<RemotePiModel>
 ) {
     var title by rememberSaveable(preset?.id) { mutableStateOf(preset?.title.orEmpty()) }
     var promptTemplate by rememberSaveable(preset?.id) { mutableStateOf(preset?.promptTemplate.orEmpty()) }
@@ -1152,6 +1157,7 @@ private fun QuickLaunchPresetEditor(
     var model by rememberSaveable(preset?.id) { mutableStateOf(preset?.model.orEmpty()) }
     var thinkingEffort by rememberSaveable(preset?.id) { mutableStateOf(preset?.thinkingEffort.orEmpty()) }
     var showThinkingMenu by remember { mutableStateOf(false) }
+    var showModelPicker by remember { mutableStateOf(false) }
     var showDirectoryPicker by remember { mutableStateOf(false) }
 
     AlertDialog(
@@ -1198,13 +1204,16 @@ private fun QuickLaunchPresetEditor(
                     textStyleMonospace = true
                 )
                 Spacer(Modifier.height(10.dp))
-                AppTextField(
-                    value = model,
-                    onValueChange = { model = it.take(512) },
-                    label = "模型（可选）",
-                    placeholder = "provider/model；留空沿用 Pi 默认",
-                    textStyleMonospace = true
-                )
+                Text("模型（可选）", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
+                OutlinedButton(onClick = { showModelPicker = true }, modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        model.ifEmpty { "默认（沿用 Pi 配置）" },
+                        modifier = Modifier.weight(1f),
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Icon(Icons.Rounded.ArrowDropDown, "选择远程 Pi 模型")
+                }
                 Spacer(Modifier.height(10.dp))
                 Text("Thinking effort", color = TextSecondary, style = MaterialTheme.typography.labelMedium)
                 Box {
@@ -1282,6 +1291,19 @@ private fun QuickLaunchPresetEditor(
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
     )
+
+    if (showModelPicker) {
+        RemotePiModelPicker(
+            workingDirectory = workingDirectory,
+            selectedModel = model,
+            onLoad = onListPiModels,
+            onDismiss = { showModelPicker = false },
+            onSelect = {
+                model = it
+                showModelPicker = false
+            }
+        )
+    }
 
     if (showDirectoryPicker) {
         RemoteDirectoryPicker(

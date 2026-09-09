@@ -26,6 +26,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -109,6 +110,7 @@ class SshManager(context: Context) {
     private val appContext = context.applicationContext
     private val ioScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val hostKeyRepository = TofuHostKeyRepository(appContext)
+    private val piModelCache = LinkedHashMap<Pair<Session, String>, List<RemotePiModel>>()
 
     @Volatile
     private var session: Session? = null
@@ -329,6 +331,31 @@ class SshManager(context: Context) {
             throw IllegalStateException(result.error.ifBlank { "退出 tmux 会话失败" }.trim())
         }
     }
+
+    suspend fun listPiModels(workingDirectory: String, refresh: Boolean = false): List<RemotePiModel> =
+        withContext(Dispatchers.IO) {
+            val activeSession = requireSession()
+            val directory = workingDirectory.trim().ifEmpty { "~" }
+            val key = activeSession to directory
+            if (!refresh) {
+                synchronized(piModelCache) { piModelCache[key] }?.let { return@withContext it }
+            }
+            val result = runInterruptible {
+                execute(buildPiModelListCommand(directory), timeoutMillis = 45_000, activeSession = activeSession)
+            }
+            if (result.output.contains("__TMUXER_PI_MISSING__")) throw PiNotInstalledException()
+            if (result.output.contains("__TMUXER_DIRECTORY_MISSING__")) {
+                throw IllegalArgumentException("远程工作目录不存在或无法访问")
+            }
+            check(result.exitCode == 0) { "获取模型失败（退出码 ${result.exitCode}），请检查远程 Pi 配置或手动输入" }
+            val models = parsePiModelList(result.output)
+            synchronized(piModelCache) {
+                if (session !== activeSession || !activeSession.isConnected) throw NoActiveConnectionException()
+                piModelCache[key] = models
+                while (piModelCache.size > 12) piModelCache.remove(piModelCache.keys.first())
+            }
+            models
+        }
 
     suspend fun listRemoteDirectories(path: String): RemoteDirectoryListing = withContext(Dispatchers.IO) {
         val activeSession = requireSession()
@@ -743,8 +770,12 @@ class SshManager(context: Context) {
         ioScope.cancel()
     }
 
-    private fun execute(command: String, timeoutMillis: Long = 15_000): CommandResult {
-        val channel = requireSession().openChannel("exec") as ChannelExec
+    private fun execute(
+        command: String,
+        timeoutMillis: Long = 15_000,
+        activeSession: Session = requireSession()
+    ): CommandResult {
+        val channel = activeSession.openChannel("exec") as ChannelExec
         val error = ByteArrayOutputStream()
         channel.setCommand(withRemoteExecutablePath(command))
         channel.setInputStream(null)
@@ -828,6 +859,7 @@ class SshManager(context: Context) {
         closeTerminalBlocking()
         runCatching { session?.disconnect() }
         session = null
+        synchronized(piModelCache) { piModelCache.clear() }
     }
 
     private fun preferredAuthentication(profile: SshProfile): String = when (profile.authType) {

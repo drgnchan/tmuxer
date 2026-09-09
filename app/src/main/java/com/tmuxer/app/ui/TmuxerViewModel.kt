@@ -24,6 +24,7 @@ import com.tmuxer.app.ssh.ImageStreamCheckpoint
 import com.tmuxer.app.ssh.NoActiveConnectionException
 import com.tmuxer.app.ssh.PiNotInstalledException
 import com.tmuxer.app.ssh.RemoteDirectoryListing
+import com.tmuxer.app.ssh.RemotePiModel
 import com.tmuxer.app.ssh.SshManager
 import com.tmuxer.app.ssh.TmuxNotInstalledException
 import com.tmuxer.app.terminal.TerminalEmulator
@@ -653,6 +654,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             thinkingEffort = preset.thinkingEffort
         )
     }
+
+    suspend fun listPiModels(workingDirectory: String, refresh: Boolean): List<RemotePiModel> =
+        sshManager.listPiModels(workingDirectory, refresh)
 
     suspend fun listRemoteDirectories(path: String): RemoteDirectoryListing =
         sshManager.listRemoteDirectories(path)
