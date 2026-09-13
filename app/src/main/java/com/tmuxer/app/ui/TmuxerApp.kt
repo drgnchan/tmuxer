@@ -1731,7 +1731,7 @@ private fun CreateSessionDialog(
     onListRemoteDirectories: suspend (String) -> RemoteDirectoryListing
 ) {
     var name by rememberSaveable { mutableStateOf("") }
-    var mode by remember { mutableStateOf(SessionLaunchMode.SHELL) }
+    var mode by remember { mutableStateOf(SessionLaunchMode.PI) }
     var launchWithoutSession by rememberSaveable { mutableStateOf(false) }
     var workingDirectory by rememberSaveable { mutableStateOf(defaultPiDirectory) }
     var initialPrompt by rememberSaveable { mutableStateOf("") }
