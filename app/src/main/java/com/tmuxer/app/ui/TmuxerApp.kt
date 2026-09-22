@@ -73,7 +73,6 @@ import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.KeyboardDoubleArrowDown
 import androidx.compose.material.icons.rounded.KeyboardDoubleArrowUp
-import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.LightMode
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Password
@@ -983,10 +982,6 @@ private fun WindowDashboardScreen(
                         item { EmptyWindows { showCreateDialog = true } }
                     } else {
                         groups.forEach { (_, sessionWindows) ->
-                            val first = sessionWindows.first()
-                            item(key = "header-${first.sessionId}") {
-                                SessionHeader(first.sessionName)
-                            }
                             items(sessionWindows, key = { it.windowId }) { window ->
                                 WindowCard(window = window, onClick = { onWindow(window) })
                             }
@@ -1374,16 +1369,24 @@ private fun QuickLaunchDialog(
     )
 }
 
-@Composable
-private fun SessionHeader(name: String) {
-    Row(
-        modifier = Modifier.fillMaxWidth().padding(top = 10.dp, bottom = 2.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Icon(Icons.Rounded.Layers, null, tint = Mint, modifier = Modifier.size(17.dp))
-        Spacer(Modifier.width(7.dp))
-        Text(name, fontWeight = FontWeight.SemiBold)
-    }
+/**
+ * Dashboard cards lead with the tmux session name, which is what Pi and the user set to describe a
+ * task. Window names are tmux defaults such as `pi` or `bash`, so they only appear as a trailing cue
+ * when they add information the title and the foreground command do not already carry.
+ */
+internal fun windowCardTitle(window: TmuxWindow): String {
+    val sessionName = window.sessionName.trim()
+    val windowName = window.name.trim()
+    if (sessionName.isNotEmpty()) return sessionName
+    return windowName.ifEmpty { "未命名会话" }
+}
+
+internal fun windowCardWindowLabel(window: TmuxWindow): String? {
+    val windowName = window.name.trim()
+    if (windowName.isEmpty()) return null
+    if (windowName.equals(windowCardTitle(window), ignoreCase = true)) return null
+    if (windowName.equals(window.command.trim(), ignoreCase = true)) return null
+    return windowName
 }
 
 @Composable
@@ -1420,13 +1423,24 @@ private fun WindowCard(window: TmuxWindow, onClick: () -> Unit) {
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        window.name,
+                        windowCardTitle(window),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
+                    windowCardWindowLabel(window)?.let { label ->
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            label,
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                     if (window.activity) {
                         Box(Modifier.size(6.dp).background(Amber, CircleShape))
                         Spacer(Modifier.width(7.dp))
