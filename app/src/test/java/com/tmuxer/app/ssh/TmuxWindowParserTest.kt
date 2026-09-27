@@ -170,7 +170,7 @@ class TmuxWindowParserTest {
     fun parsesPrintableFieldSeparatorUsedByTmux() {
         val line = listOf(
             "mobile", "\$0", "2", "@7", "agent",
-            "1", "3", "pi", "/root/project", "1", "0"
+            "1", "3", "pi", "/root/project", "1", "0", "1720000000"
         ).joinToString(TMUX_FIELD_SEPARATOR)
 
         val window = parseTmuxWindow(line)!!
@@ -183,6 +183,7 @@ class TmuxWindowParserTest {
         assertEquals("/root/project", window.path)
         assertEquals(true, window.active)
         assertEquals(true, window.activity)
+        assertEquals("1720000000", window.serverStartTime)
     }
 
     @Test

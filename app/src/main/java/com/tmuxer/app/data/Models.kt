@@ -44,7 +44,8 @@ data class TmuxWindow(
     val command: String,
     val path: String,
     val activity: Boolean,
-    val last: Boolean
+    val last: Boolean,
+    val serverStartTime: String = ""
 )
 
 data class ConnectionInfo(

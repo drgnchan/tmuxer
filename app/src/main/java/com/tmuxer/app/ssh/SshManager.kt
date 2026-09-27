@@ -201,7 +201,7 @@ class SshManager(context: Context) {
             "#{session_name}", "#{session_id}", "#{window_index}", "#{window_id}",
             "#{window_name}", "#{window_active}", "#{window_panes}",
             "#{pane_current_command}", "#{pane_current_path}",
-            "#{window_activity_flag}", "#{window_last_flag}"
+            "#{window_activity_flag}", "#{window_last_flag}", "#{start_time}"
         ).joinToString(TMUX_FIELD_SEPARATOR)
         val command = "if ! command -v tmux >/dev/null 2>&1; then " +
             "printf '__TMUXER_MISSING__\\n'; exit 127; " +
@@ -972,8 +972,8 @@ internal fun buildTmuxNewSessionCommand(
 private fun shellQuote(value: String): String = "'" + value.replace("'", "'\"'\"'") + "'"
 
 internal fun parseTmuxWindow(line: String): TmuxWindow? {
-    val parts = line.split(TMUX_FIELD_SEPARATOR, limit = 11)
-    if (parts.size < 11) return null
+    val parts = line.split(TMUX_FIELD_SEPARATOR, limit = 12)
+    if (parts.size < 12 || parts[11].toLongOrNull() == null) return null
     return TmuxWindow(
         sessionName = parts[0],
         sessionId = parts[1],
@@ -985,7 +985,8 @@ internal fun parseTmuxWindow(line: String): TmuxWindow? {
         command = parts[7],
         path = parts[8],
         activity = parts[9] == "1",
-        last = parts[10] == "1"
+        last = parts[10] == "1",
+        serverStartTime = parts[11]
     )
 }
 

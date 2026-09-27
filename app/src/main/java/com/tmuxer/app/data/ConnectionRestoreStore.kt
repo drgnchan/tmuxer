@@ -13,7 +13,8 @@ data class TerminalRestoreTarget(
     val sessionId: String,
     val windowIndex: Int,
     val windowId: String,
-    val windowName: String
+    val windowName: String,
+    val serverStartTime: String = ""
 ) {
     fun placeholder() = TmuxWindow(
         sessionName = sessionName,
@@ -26,7 +27,8 @@ data class TerminalRestoreTarget(
         command = "",
         path = "",
         activity = false,
-        last = false
+        last = false,
+        serverStartTime = serverStartTime
     )
 }
 
@@ -47,7 +49,10 @@ class ConnectionRestoreStore(context: Context) {
         if (windowIndex < 0) return ConnectionRestoreState(profileId)
         return ConnectionRestoreState(
             profileId,
-            TerminalRestoreTarget(sessionName, sessionId, windowIndex, windowId, windowName)
+            TerminalRestoreTarget(
+                sessionName, sessionId, windowIndex, windowId, windowName,
+                preferences.getString(KEY_SERVER_START_TIME, null).orEmpty()
+            )
         )
     }
 
@@ -68,6 +73,7 @@ class ConnectionRestoreStore(context: Context) {
             .putInt(KEY_WINDOW_INDEX, window.index)
             .putString(KEY_WINDOW_ID, window.windowId)
             .putString(KEY_WINDOW_NAME, window.name)
+            .putString(KEY_SERVER_START_TIME, window.serverStartTime)
             .apply()
     }
 
@@ -81,6 +87,7 @@ class ConnectionRestoreStore(context: Context) {
             .remove(KEY_WINDOW_INDEX)
             .remove(KEY_WINDOW_ID)
             .remove(KEY_WINDOW_NAME)
+            .remove(KEY_SERVER_START_TIME)
 
     private companion object {
         const val PREFERENCES = "connection_restore"
@@ -91,6 +98,7 @@ class ConnectionRestoreStore(context: Context) {
         const val KEY_WINDOW_INDEX = "window_index"
         const val KEY_WINDOW_ID = "window_id"
         const val KEY_WINDOW_NAME = "window_name"
+        const val KEY_SERVER_START_TIME = "server_start_time"
     }
 }
 
