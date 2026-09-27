@@ -2196,7 +2196,7 @@ private fun TerminalScreen(
         }
     }
     val tabListState = rememberLazyListState()
-    val piMode = selected?.let { it.command == "pi" || it.name.equals("pi", true) } == true
+    val piMode = selected?.command == "pi"
     LaunchedEffect(selected?.windowId, windowIds) {
         val selectedIndex = windowIds.indexOf(selected?.windowId)
         if (selectedIndex >= 0) tabListState.animateScrollToItem(selectedIndex)
