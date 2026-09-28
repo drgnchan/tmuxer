@@ -2409,7 +2409,6 @@ private fun TerminalScreen(
         }
 
         SpecialKeyBar(
-            piMode = piMode,
             ctrlActive = ctrlActive,
             shiftActive = shiftActive,
             altActive = altActive,
@@ -2620,7 +2619,6 @@ private fun WindowTab(
 
 @Composable
 private fun SpecialKeyBar(
-    piMode: Boolean,
     ctrlActive: Boolean,
     shiftActive: Boolean,
     altActive: Boolean,
@@ -2643,44 +2641,25 @@ private fun SpecialKeyBar(
                 .padding(horizontal = 5.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            if (piMode) {
-                KeyButton("Esc", description = "停止生成", compact = true) { onKey("\u001B") }
-                KeyButton("/", description = "输入斜杠命令", compact = true) { onKey("/") }
-                KeyButton("^X", description = "复制上一条 Pi 回复", compact = true) { onKey("\u0018") }
-                KeyButton("^U", description = "清空输入", compact = true) { onKey("\u0015") }
-                KeyButton("^J", description = "插入换行", compact = true) { onKey("\u000A") }
-                KeyButton("^T", description = "展开或折叠思考内容", compact = true) { onKey("\u0014") }
-                KeyButton("^O", description = "展开或折叠工具输出", compact = true) { onKey("\u000F") }
-                KeyButton("^P", description = "Ctrl+P", compact = true) { onKey("\u0010") }
-                ShiftTabButton { onKey("\u001B[Z") }
-            } else {
-                KeyButton("Esc", description = "Escape") { onKey("\u001B") }
-                KeyButton("Ctrl", description = "Control", active = ctrlActive, onClick = onControl)
-                KeyButton("Shift", active = shiftActive, onClick = onShift)
-                KeyButton("Alt", active = altActive, onClick = onAlt)
-                KeyButton("Tab") { onKey("\t") }
-                ShiftTabButton { onKey("\u001B[Z") }
-                KeyButton("^P", description = "Ctrl+P") { onKey("\u0010") }
-                KeyButton("/", description = "输入斜杠") { onKey("/") }
-                KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowUp, description = "向上翻页") {
-                    onKey("\u001B[5~")
-                }
-                KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowDown, description = "向下翻页") {
-                    onKey("\u001B[6~")
-                }
-            }
+            KeyButton("Esc", description = "Escape", compact = true) { onKey("\u001B") }
+            KeyButton("/", description = "输入斜杠", compact = true) { onKey("/") }
+            KeyButton("^X", description = "Ctrl+X", compact = true) { onKey("\u0018") }
+            KeyButton("^U", description = "Ctrl+U", compact = true) { onKey("\u0015") }
+            KeyButton("^J", description = "Ctrl+J", compact = true) { onKey("\u000A") }
+            KeyButton("^T", description = "Ctrl+T", compact = true) { onKey("\u0014") }
+            KeyButton("^O", description = "Ctrl+O", compact = true) { onKey("\u000F") }
+            KeyButton("^P", description = "Ctrl+P", compact = true) { onKey("\u0010") }
+            ShiftTabButton { onKey("\u001B[Z") }
         }
         Row(
             modifier = Modifier.fillMaxWidth().horizontalScroll(secondRowScroll)
                 .padding(horizontal = 5.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            if (piMode) {
-                KeyButton("Ctrl", description = "Control", active = ctrlActive, onClick = onControl)
-                KeyButton("Shift", active = shiftActive, onClick = onShift)
-                KeyButton("Alt", active = altActive, onClick = onAlt)
-                KeyButton("Tab") { onKey("\t") }
-            }
+            KeyButton("Ctrl", description = "Control", active = ctrlActive, onClick = onControl)
+            KeyButton("Shift", active = shiftActive, onClick = onShift)
+            KeyButton("Alt", active = altActive, onClick = onAlt)
+            KeyButton("Tab") { onKey("\t") }
             KeyButton(
                 icon = Icons.Rounded.KeyboardArrowLeft,
                 description = "左方向键",
@@ -2701,13 +2680,11 @@ private fun SpecialKeyBar(
                 description = "右方向键",
                 repeatOnLongPress = true
             ) { onKey("\u001B[C") }
-            if (piMode) {
-                KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowUp, description = "向上翻页") {
-                    onKey("\u001B[5~")
-                }
-                KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowDown, description = "向下翻页") {
-                    onKey("\u001B[6~")
-                }
+            KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowUp, description = "向上翻页") {
+                onKey("\u001B[5~")
+            }
+            KeyButton(icon = Icons.Rounded.KeyboardDoubleArrowDown, description = "向下翻页") {
+                onKey("\u001B[6~")
             }
             KeyButton("-") { onKey("-") }
             KeyButton("|") { onKey("|") }
