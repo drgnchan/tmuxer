@@ -92,6 +92,9 @@ internal const val TMUX_FIELD_SEPARATOR = "__TMUXER_FIELD_7F3A__"
 internal const val MAX_IMAGE_STREAM_REPLAY_BYTES = 32 * 1024 * 1024
 private const val MAX_TERMINAL_IMAGE_DOWNLOAD_BYTES = 18 * 1024 * 1024
 
+internal fun isTmuxSessionRenamedNotification(line: String): Boolean =
+    line == "%session-renamed" || line.startsWith("%session-renamed ")
+
 private val TERMINAL_IMAGE_RELATIVE_PATH = Regex(
     "(?:images|pi-w[0-9]+(?:\\.stream)?\\.images)/[0-9a-f]{64}\\.(png|jpg|gif|webp|bin)"
 )
@@ -121,8 +124,15 @@ class SshManager(context: Context) {
     private var imageChannel: ChannelExec? = null
     @Volatile
     private var imageInput: InputStream? = null
+    @Volatile
+    private var sessionEventChannel: ChannelExec? = null
+    @Volatile
+    private var sessionEventInput: InputStream? = null
+    @Volatile
+    private var sessionEventOutput: OutputStream? = null
     private var terminalReader: Job? = null
     private var imageReader: Job? = null
+    private var sessionEventReader: Job? = null
     private var terminalResizeJob: Job? = null
     private val terminalWrites = Channel<TerminalWrite>(Channel.UNLIMITED)
 
@@ -191,7 +201,7 @@ class SshManager(context: Context) {
             "#{session_name}", "#{session_id}", "#{window_index}", "#{window_id}",
             "#{window_name}", "#{window_active}", "#{window_panes}",
             "#{pane_current_command}", "#{pane_current_path}",
-            "#{window_activity_flag}", "#{window_last_flag}", "#{start_time}"
+            "#{window_activity_flag}", "#{window_last_flag}"
         ).joinToString(TMUX_FIELD_SEPARATOR)
         val command = "if ! command -v tmux >/dev/null 2>&1; then " +
             "printf '__TMUXER_MISSING__\\n'; exit 127; " +
@@ -289,6 +299,7 @@ class SshManager(context: Context) {
                 "tmux set-option -wu -t $target @tmuxer_image_stream 2>/dev/null || true; " +
                 "tmux set-environment -t $target TMUXER_IMAGE_DIR \"\$IMAGE_DIR\"; " +
                 "tmux set-environment -t $target TMUXER_IMAGE_EXTENSION \"\$IMAGE_EXTENSION\"; " +
+                "tmux rename-window -t $target pi; " +
                 "tmux respawn-pane -k -t $target ${shellQuote(paneCommand)})"
         } else {
             ""
@@ -479,6 +490,7 @@ class SshManager(context: Context) {
         onImageReplayStart: (Boolean) -> Unit,
         onImageCheckpoint: (ImageStreamCheckpoint) -> Unit,
         onImageReplayComplete: () -> Unit,
+        onSessionRenamed: () -> Unit,
         onClosed: (Int) -> Unit
     ) = withContext(Dispatchers.IO) {
         require(sessionId.matches(Regex("\\$[0-9]+"))) { "无效的 tmux 会话" }
@@ -527,6 +539,10 @@ class SshManager(context: Context) {
         terminalChannel = channel
         terminalInput = input
         terminalOutput = output
+        // A lightweight tmux control client receives metadata notifications but no pane output.
+        // This lets external renames (for example pi-auto-session-title) update Android UI state
+        // immediately instead of waiting for the periodic SSH poll or a manual refresh.
+        runCatching { openSessionEventStream(sessionId, onSessionRenamed) }
         terminalReader = ioScope.launch {
             val buffer = ByteArray(16 * 1024)
             try {
@@ -550,6 +566,59 @@ class SshManager(context: Context) {
                     if (errorBytes.isNotEmpty()) onBytes(errorBytes, errorBytes.size)
                     onClosed(channel.exitStatus)
                 }
+            }
+        }
+    }
+
+    private fun openSessionEventStream(
+        sessionId: String,
+        onSessionRenamed: () -> Unit
+    ) {
+        closeSessionEventStreamBlocking()
+        val channel = requireSession().openChannel("exec") as ChannelExec
+        channel.setCommand(
+            withRemoteExecutablePath(
+                "export LANG=C.UTF-8 LC_ALL=C.UTF-8; " +
+                    "exec tmux -C attach-session " +
+                    "-f no-output,read-only,ignore-size -t ${shellQuote(sessionId)}"
+            )
+        )
+        val input = channel.inputStream
+        // Keep control-mode stdin open for the lifetime of the observer. Closing it makes tmux
+        // detach the client and stops subsequent rename notifications.
+        val output = channel.outputStream
+        channel.setErrStream(ByteArrayOutputStream())
+        try {
+            channel.connect(10_000)
+        } catch (error: Throwable) {
+            runCatching { input.close() }
+            runCatching { output.close() }
+            runCatching { channel.disconnect() }
+            throw error
+        }
+
+        sessionEventChannel = channel
+        sessionEventInput = input
+        sessionEventOutput = output
+        sessionEventReader = ioScope.launch {
+            try {
+                input.bufferedReader(Charsets.UTF_8).use { reader ->
+                    while (isActive && channel.isConnected) {
+                        val line = reader.readLine() ?: break
+                        if (isTmuxSessionRenamedNotification(line)) onSessionRenamed()
+                    }
+                }
+            } catch (_: Throwable) {
+                // Closing or replacing a terminal interrupts the blocking control-mode read.
+            } finally {
+                if (sessionEventChannel === channel) {
+                    sessionEventChannel = null
+                    sessionEventInput = null
+                    sessionEventOutput = null
+                    sessionEventReader = null
+                }
+                runCatching { output.close() }
+                runCatching { channel.disconnect() }
             }
         }
     }
@@ -761,6 +830,7 @@ class SshManager(context: Context) {
         imageReader = null
         imageInput = null
         imageChannel = null
+        closeSessionEventStreamBlocking()
         reader?.cancel()
         graphicsReader?.cancel()
         runCatching { input?.close() }
@@ -768,6 +838,21 @@ class SshManager(context: Context) {
         runCatching { channel?.disconnect() }
         runCatching { graphicsInput?.close() }
         runCatching { graphicsChannel?.disconnect() }
+    }
+
+    private fun closeSessionEventStreamBlocking() {
+        val reader = sessionEventReader
+        val input = sessionEventInput
+        val output = sessionEventOutput
+        val channel = sessionEventChannel
+        sessionEventReader = null
+        sessionEventInput = null
+        sessionEventOutput = null
+        sessionEventChannel = null
+        reader?.cancel()
+        runCatching { input?.close() }
+        runCatching { output?.close() }
+        runCatching { channel?.disconnect() }
     }
 
     private fun disconnectBlocking() {
@@ -887,8 +972,8 @@ internal fun buildTmuxNewSessionCommand(
 private fun shellQuote(value: String): String = "'" + value.replace("'", "'\"'\"'") + "'"
 
 internal fun parseTmuxWindow(line: String): TmuxWindow? {
-    val parts = line.split(TMUX_FIELD_SEPARATOR, limit = 12)
-    if (parts.size < 12 || parts[11].toLongOrNull() == null) return null
+    val parts = line.split(TMUX_FIELD_SEPARATOR, limit = 11)
+    if (parts.size < 11) return null
     return TmuxWindow(
         sessionName = parts[0],
         sessionId = parts[1],
@@ -900,8 +985,7 @@ internal fun parseTmuxWindow(line: String): TmuxWindow? {
         command = parts[7],
         path = parts[8],
         activity = parts[9] == "1",
-        last = parts[10] == "1",
-        serverStartTime = parts[11]
+        last = parts[10] == "1"
     )
 }
 

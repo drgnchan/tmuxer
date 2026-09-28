@@ -155,8 +155,6 @@ import com.tmuxer.app.data.QuickLaunchPreset
 import com.tmuxer.app.data.SshProfile
 import com.tmuxer.app.data.buildQuickLaunchPrompt
 import com.tmuxer.app.data.TmuxWindow
-import com.tmuxer.app.data.displayWindowTitle
-import com.tmuxer.app.data.windowTitleKey
 import com.tmuxer.app.ssh.RemoteDirectoryListing
 import com.tmuxer.app.ssh.RemotePiModel
 import com.tmuxer.app.terminal.TerminalImageOpenRequest
@@ -191,7 +189,6 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
     val profiles by viewModel.profiles.collectAsStateWithLifecycle()
     val connection by viewModel.connection.collectAsStateWithLifecycle()
     val windows by viewModel.windows.collectAsStateWithLifecycle()
-    val windowTitles by viewModel.windowTitles.collectAsStateWithLifecycle()
     val recentPiDirectories by viewModel.recentPiDirectories.collectAsStateWithLifecycle()
     val defaultPiDirectory by viewModel.defaultPiDirectory.collectAsStateWithLifecycle()
     val quickLaunchPresets by viewModel.quickLaunchPresets.collectAsStateWithLifecycle()
@@ -239,8 +236,6 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                     connection = connection,
                     recovering = connectionRecoveryStatus is ConnectionRecoveryStatus.Restoring,
                     windows = windows,
-                    windowTitles = windowTitles,
-                    onSaveWindowTitle = viewModel::saveWindowTitle,
                     recentPiDirectories = recentPiDirectories,
                     defaultPiDirectory = defaultPiDirectory,
                     quickLaunchPresets = quickLaunchPresets,
@@ -264,8 +259,6 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
                 AppScreen.Terminal -> TerminalScreen(
                     selected = selectedWindow,
                     windows = windows,
-                    windowTitles = windowTitles,
-                    onSaveWindowTitle = viewModel::saveWindowTitle,
                     hostLabel = when (val state = connection) {
                         is ConnectionState.Connecting -> state.profile
                         is ConnectionState.Connected -> state.info.profile
@@ -869,8 +862,6 @@ private fun WindowDashboardScreen(
     connection: ConnectionState,
     recovering: Boolean,
     windows: List<TmuxWindow>,
-    windowTitles: Map<String, String>,
-    onSaveWindowTitle: (TmuxWindow, String) -> Unit,
     recentPiDirectories: List<String>,
     defaultPiDirectory: String,
     quickLaunchPresets: List<QuickLaunchPreset>,
@@ -890,7 +881,6 @@ private fun WindowDashboardScreen(
     onListPiModels: suspend (String, Boolean) -> List<RemotePiModel>
 ) {
     var showCreateDialog by remember { mutableStateOf(false) }
-    var editingWindowTitle by remember { mutableStateOf<TmuxWindow?>(null) }
     var editingQuickPreset by remember { mutableStateOf<QuickLaunchPreset?>(null) }
     var showNewQuickPreset by remember { mutableStateOf(false) }
     var launchingQuickPreset by remember { mutableStateOf<QuickLaunchPreset?>(null) }
@@ -993,30 +983,13 @@ private fun WindowDashboardScreen(
                     } else {
                         groups.forEach { (_, sessionWindows) ->
                             items(sessionWindows, key = { it.windowId }) { window ->
-                                WindowCard(
-                                    window = window,
-                                    title = displayWindowTitle(window, windowTitles),
-                                    onClick = { onWindow(window) },
-                                    onEditTitle = { editingWindowTitle = window }
-                                )
+                                WindowCard(window = window, onClick = { onWindow(window) })
                             }
                         }
                     }
                 }
             }
         }
-    }
-
-    editingWindowTitle?.let { window ->
-        EditWindowTitleDialog(
-            window = window,
-            currentTitle = windowTitleKey(window)?.let(windowTitles::get),
-            onDismiss = { editingWindowTitle = null },
-            onSave = { title ->
-                onSaveWindowTitle(window, title)
-                editingWindowTitle = null
-            }
-        )
     }
 
     if (showCreateDialog) {
@@ -1396,40 +1369,28 @@ private fun QuickLaunchDialog(
     )
 }
 
-@Composable
-private fun EditWindowTitleDialog(
-    window: TmuxWindow,
-    currentTitle: String?,
-    onDismiss: () -> Unit,
-    onSave: (String) -> Unit
-) {
-    var title by rememberSaveable(window.windowId, window.serverStartTime) {
-        mutableStateOf(currentTitle.orEmpty())
-    }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("自定义窗口标题") },
-        text = {
-            OutlinedTextField(
-                value = title,
-                onValueChange = { title = it.take(40) },
-                label = { Text("标题") },
-                singleLine = true,
-                supportingText = { Text("仅保存在本机；留空则恢复默认名称") }
-            )
-        },
-        confirmButton = { TextButton(onClick = { onSave(title) }) { Text("保存") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } }
-    )
+/**
+ * Dashboard cards lead with the tmux session name, which is what Pi and the user set to describe a
+ * task. Window names are tmux defaults such as `pi` or `bash`, so they only appear as a trailing cue
+ * when they add information the title and the foreground command do not already carry.
+ */
+internal fun windowCardTitle(window: TmuxWindow): String {
+    val sessionName = window.sessionName.trim()
+    val windowName = window.name.trim()
+    if (sessionName.isNotEmpty()) return sessionName
+    return windowName.ifEmpty { "未命名会话" }
+}
+
+internal fun windowCardWindowLabel(window: TmuxWindow): String? {
+    val windowName = window.name.trim()
+    if (windowName.isEmpty()) return null
+    if (windowName.equals(windowCardTitle(window), ignoreCase = true)) return null
+    if (windowName.equals(window.command.trim(), ignoreCase = true)) return null
+    return windowName
 }
 
 @Composable
-private fun WindowCard(
-    window: TmuxWindow,
-    title: String,
-    onClick: () -> Unit,
-    onEditTitle: () -> Unit
-) {
+private fun WindowCard(window: TmuxWindow, onClick: () -> Unit) {
     OutlinedCard(
         onClick = onClick,
         modifier = Modifier.fillMaxWidth(),
@@ -1462,15 +1423,23 @@ private fun WindowCard(
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(
-                        title,
+                        windowCardTitle(window),
                         style = MaterialTheme.typography.titleSmall,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f)
                     )
-                    IconButton(onClick = onEditTitle, modifier = Modifier.size(32.dp)) {
-                        Icon(Icons.Rounded.Edit, "修改$title 的标题", modifier = Modifier.size(17.dp))
+                    windowCardWindowLabel(window)?.let { label ->
+                        Spacer(Modifier.width(7.dp))
+                        Text(
+                            label,
+                            color = TextSecondary,
+                            style = MaterialTheme.typography.labelSmall,
+                            fontFamily = FontFamily.Monospace,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
                     }
                     if (window.activity) {
                         Box(Modifier.size(6.dp).background(Amber, CircleShape))
@@ -2125,8 +2094,6 @@ private fun SessionModeButton(
 private fun TerminalScreen(
     selected: TmuxWindow?,
     windows: List<TmuxWindow>,
-    windowTitles: Map<String, String>,
-    onSaveWindowTitle: (TmuxWindow, String) -> Unit,
     hostLabel: String,
     connected: Boolean,
     recovering: Boolean,
@@ -2149,7 +2116,6 @@ private fun TerminalScreen(
     var loadingImage by remember { mutableStateOf(false) }
     var imageLoadGeneration by remember { mutableStateOf(0L) }
     var showExitSessionDialog by remember(selected?.sessionId) { mutableStateOf(false) }
-    var editingWindowTitle by remember { mutableStateOf<TmuxWindow?>(null) }
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
     val openTerminalWebLink: (String) -> Unit = { url ->
@@ -2196,7 +2162,7 @@ private fun TerminalScreen(
         }
     }
     val tabListState = rememberLazyListState()
-    val piMode = selected?.command == "pi"
+    val piMode = selected?.let { it.command == "pi" || it.name.equals("pi", true) } == true
     LaunchedEffect(selected?.windowId, windowIds) {
         val selectedIndex = windowIds.indexOf(selected?.windowId)
         if (selectedIndex >= 0) tabListState.animateScrollToItem(selectedIndex)
@@ -2220,13 +2186,6 @@ private fun TerminalScreen(
                 overflow = TextOverflow.Ellipsis,
                 textAlign = TextAlign.Center
             )
-            IconButton(
-                onClick = { editingWindowTitle = selected },
-                enabled = selected != null && connected,
-                modifier = Modifier.size(44.dp)
-            ) {
-                Icon(Icons.Rounded.Edit, "修改窗口标题", tint = TextSecondary, modifier = Modifier.size(21.dp))
-            }
             IconButton(onClick = onToggleTheme, modifier = Modifier.size(44.dp)) {
                 Icon(
                     if (terminalTheme == TerminalTheme.DARK) Icons.Rounded.LightMode else Icons.Rounded.DarkMode,
@@ -2286,7 +2245,6 @@ private fun TerminalScreen(
                 items(windows, key = { it.windowId }) { window ->
                     WindowTab(
                         window = window,
-                        title = windowTabTitle(window, windows, windowTitles),
                         selected = selected?.windowId == window.windowId,
                         onClick = { onSwitchWindow(window) }
                     )
@@ -2416,18 +2374,6 @@ private fun TerminalScreen(
             onShift = onShift,
             onAlt = onAlt,
             onKey = onSpecialKey
-        )
-    }
-
-    editingWindowTitle?.let { window ->
-        EditWindowTitleDialog(
-            window = window,
-            currentTitle = windowTitleKey(window)?.let(windowTitles::get),
-            onDismiss = { editingWindowTitle = null },
-            onSave = { title ->
-                onSaveWindowTitle(window, title)
-                editingWindowTitle = null
-            }
         )
     }
 
@@ -2575,20 +2521,12 @@ private fun terminalImageFormat(data: ByteArray): Pair<String, String> = when {
     else -> "application/octet-stream" to "bin"
 }
 
-internal fun windowTabTitle(
-    window: TmuxWindow,
-    windows: List<TmuxWindow>,
-    titles: Map<String, String>
-): String {
-    val title = displayWindowTitle(window, titles)
-    return if (windows.count { displayWindowTitle(it, titles) == title } > 1)
-        "$title · ${window.windowId.removePrefix("@")}" else title
-}
+internal fun windowTabLabel(window: TmuxWindow): String =
+    "${window.sessionName}:${window.index}"
 
 @Composable
 private fun WindowTab(
     window: TmuxWindow,
-    title: String,
     selected: Boolean,
     onClick: () -> Unit
 ) {
@@ -2604,7 +2542,7 @@ private fun WindowTab(
             verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
-                title,
+                windowTabLabel(window),
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 style = MaterialTheme.typography.labelSmall

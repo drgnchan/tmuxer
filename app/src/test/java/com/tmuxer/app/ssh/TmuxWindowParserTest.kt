@@ -159,10 +159,18 @@ class TmuxWindowParserTest {
     }
 
     @Test
+    fun recognizesTmuxControlModeSessionRenameNotifications() {
+        assertTrue(isTmuxSessionRenamedNotification("%session-renamed \$0 新标题"))
+        assertTrue(isTmuxSessionRenamedNotification("%session-renamed 新标题"))
+        assertFalse(isTmuxSessionRenamedNotification("%session-changed \$0 新标题"))
+        assertFalse(isTmuxSessionRenamedNotification("%output %0 title"))
+    }
+
+    @Test
     fun parsesPrintableFieldSeparatorUsedByTmux() {
         val line = listOf(
             "mobile", "\$0", "2", "@7", "agent",
-            "1", "3", "pi", "/root/project", "1", "0", "1720000000"
+            "1", "3", "pi", "/root/project", "1", "0"
         ).joinToString(TMUX_FIELD_SEPARATOR)
 
         val window = parseTmuxWindow(line)!!
@@ -175,7 +183,6 @@ class TmuxWindowParserTest {
         assertEquals("/root/project", window.path)
         assertEquals(true, window.active)
         assertEquals(true, window.activity)
-        assertEquals("1720000000", window.serverStartTime)
     }
 
     @Test
