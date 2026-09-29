@@ -19,6 +19,14 @@ android {
         vectorDrawables.useSupportLibrary = true
     }
 
+    signingConfigs {
+        getByName("debug") {
+            // CI restores the shared key to an explicit path; AGP's default debug keystore location
+            // is not reliable on hosted runners. Locally the default ~/.android/debug.keystore is used.
+            System.getenv("TMUXER_SIGNING_KEYSTORE")?.takeIf { it.isNotBlank() }?.let { storeFile = file(it) }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = true

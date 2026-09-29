@@ -54,8 +54,11 @@ jobs:
           DEBUG_KEYSTORE_BASE64: ${{ secrets.DEBUG_KEYSTORE_BASE64 }}
         run: |
           if [ -n "$DEBUG_KEYSTORE_BASE64" ]; then
-            mkdir -p ~/.android
-            echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+            KEYSTORE="$RUNNER_TEMP/debug.keystore"
+            echo "$DEBUG_KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
+            keytool -list -v -keystore "$KEYSTORE" -storepass android -alias androiddebugkey \
+              | grep 'SHA256:'
+            echo "TMUXER_SIGNING_KEYSTORE=$KEYSTORE" >> "$GITHUB_ENV"
             echo "SIGNING_KEY_RESTORED=true" >> "$GITHUB_ENV"
           elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             echo "::error::The DEBUG_KEYSTORE_BASE64 secret is required to sign releases"
