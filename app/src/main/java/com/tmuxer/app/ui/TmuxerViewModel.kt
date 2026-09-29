@@ -5,6 +5,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
 import android.net.Uri
+import android.os.SystemClock
 import android.provider.OpenableColumns
 import com.jcraft.jsch.JSchException
 import com.jcraft.jsch.SftpException
@@ -32,7 +33,13 @@ import com.tmuxer.app.ssh.UntrustedHostKeyException
 import com.tmuxer.app.terminal.TerminalEmulator
 import com.tmuxer.app.terminal.TerminalTheme
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.ensureActive
@@ -43,12 +50,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
+import java.util.concurrent.atomic.AtomicBoolean
 
 private const val BRACKETED_PASTE_START = "\u001B[200~"
 private const val BRACKETED_PASTE_END = "\u001B[201~"
@@ -161,6 +170,105 @@ internal fun nextWindowAfterSessionExit(
         ?: windows.take(exitingIndex)
             .asReversed()
             .firstOrNull { it.sessionId != exitingWindow.sessionId }
+}
+
+/**
+ * Runs [action] at most once at a time. Requests made while a run is in flight are merged into a
+ * single follow-up run, so a burst of requests costs at most one extra run and runs never overlap.
+ */
+internal class CoalescingRunner(
+    private val scope: CoroutineScope,
+    private val action: suspend () -> Unit
+) {
+    private val lock = Any()
+    private var draining = false
+    private var next: CompletableDeferred<Unit>? = null
+
+    /**
+     * Requests a run and returns a handle that completes once a run that started after this call
+     * has finished. Failures of [action] are swallowed; the handle still completes.
+     */
+    fun request(): Deferred<Unit> = synchronized(lock) {
+        next ?: CompletableDeferred<Unit>().also { pending ->
+            next = pending
+            if (!draining) {
+                draining = true
+                // ATOMIC: even a cancelled scope enters drain(), which then releases the waiters.
+                scope.launch(start = CoroutineStart.ATOMIC) { drain() }
+            }
+        }
+    }
+
+    /** Requests a run and waits for it. */
+    suspend fun run() = request().await()
+
+    private suspend fun drain() {
+        var current: CompletableDeferred<Unit>? = null
+        try {
+            while (true) {
+                current = synchronized(lock) {
+                    next.also {
+                        next = null
+                        if (it == null) draining = false
+                    }
+                } ?: return
+                currentCoroutineContext().ensureActive()
+                try {
+                    action()
+                } catch (_: Throwable) {
+                    // Only a cancelled scope ends the drain. Any other failure, including a stray
+                    // CancellationException from a superseded operation, is the action's to report.
+                    currentCoroutineContext().ensureActive()
+                }
+                current.complete(Unit)
+                current = null
+            }
+        } catch (error: CancellationException) {
+            current?.cancel(error)
+            synchronized(lock) {
+                draining = false
+                next?.cancel(error)
+                next = null
+            }
+            throw error
+        }
+    }
+}
+
+/**
+ * Orders window-list results that are fetched concurrently: a listing may be applied only if no
+ * listing that started later has been applied already, and [invalidate] discards every listing
+ * still in flight (for example when the connection is replaced).
+ */
+internal class ListingSequencer {
+    private var issued = 0L
+    private var applied = 0L
+
+    fun begin(): Long = ++issued
+
+    /** Marks [ticket] applied, or returns false when a newer listing already won. */
+    fun tryApply(ticket: Long): Boolean {
+        if (ticket <= applied) return false
+        applied = ticket
+        return true
+    }
+
+    fun isSuperseded(ticket: Long): Boolean = ticket <= applied
+
+    fun invalidate() {
+        applied = ++issued
+    }
+}
+
+/** How long the poll waits between window listings; notifications cover most changes. */
+internal fun windowPollIntervalMillis(onTerminal: Boolean, observerActive: Boolean): Long = when {
+    // The observer reports every add/close/rename/select immediately. The poll only catches what
+    // tmux does not notify (activity flags, commands in windows with automatic-rename off).
+    observerActive && onTerminal -> 60_000
+    observerActive -> 15_000
+    // Inside a live terminal, polling a second SSH channel less often reduces contention.
+    onTerminal -> 15_000
+    else -> 5_000
 }
 
 /** A connection paused before authentication until the user confirms the server's host key. */
@@ -283,6 +391,25 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private var terminalColumns = 80
     private var terminalRows = 24
 
+    // Every refresh request (poll, tmux notification, manual, navigation) goes through one runner,
+    // so a burst causes at most one list-windows in flight plus one follow-up.
+    private val windowRefresher = CoalescingRunner(viewModelScope) { refreshWindowsInternal() }
+    // Flows that list windows themselves (connect, create, exit) still race the runner; this keeps
+    // a slower, older listing from overwriting a newer one.
+    private val windowListings = ListingSequencer()
+    private val windowObserverActive = MutableStateFlow(false)
+    private var windowObserverJob: Job? = null
+    private var windowObserverToken = 0
+    private var windowObserverStartedAt = 0L
+    private var windowObserverRetryAt = 0L
+    private val topologyRefreshScheduled = AtomicBoolean(false)
+
+    // SecureProfileStore.save does Keystore IPC and AES, so keep it off the main thread while
+    // still applying saves in order. The scope outlives viewModelScope so a save queued just
+    // before onCleared is not dropped.
+    private val profileSaveScope =
+        CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
+
     fun onAppForegrounded() {
         appForeground.value = true
         ensureConnectionRestored()
@@ -346,8 +473,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         profile: SshProfile,
         restore: ConnectionRestoreState
     ) {
+        val ticket = windowListings.begin()
         val latest = sshManager.listWindows()
-        _windows.value = latest
+        applyWindowListing(ticket, latest)
         _dashboardMessage.value = null
         val target = restore.terminalTarget
         if (target == null) {
@@ -382,15 +510,18 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         prepareRestoreUi(profile, restore)
         terminalGeneration++
         refreshJob?.cancel()
+        windowListings.invalidate()
+        resetWindowObserver()
         var lastError: Throwable = NoActiveConnectionException()
         val retryDelays = longArrayOf(1_000, 2_000, 4_000, 8_000)
 
         for (attempt in 0..retryDelays.size) {
             try {
                 val info = sshManager.connect(profile)
+                val ticket = windowListings.begin()
                 val latest = sshManager.listWindows()
                 _connection.value = ConnectionState.Connected(info)
-                _windows.value = latest
+                applyWindowListing(ticket, latest)
                 _dashboardMessage.value = null
                 startAutoRefresh()
 
@@ -461,7 +592,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         val existingIndex = updated.indexOfFirst { it.id == profile.id }
         if (existingIndex >= 0) updated[existingIndex] = profile else updated += profile
         _profiles.value = updated
-        profileStore.save(updated)
+        persistProfiles(updated)
         if (connectAfterSave) connect(profile) else _screen.value = AppScreen.Hosts
     }
 
@@ -471,11 +602,21 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         quickLaunchPresetStore.removeProfile(profile.id)
         val updated = _profiles.value.filterNot { it.id == profile.id }
         _profiles.value = updated
-        profileStore.save(updated)
+        persistProfiles(updated)
         _recentPiDirectories.value = emptyList()
         _defaultPiDirectory.value = "~"
         _quickLaunchPresets.value = emptyList()
         _screen.value = AppScreen.Hosts
+    }
+
+    private fun persistProfiles(profiles: List<SshProfile>) {
+        profileSaveScope.launch {
+            try {
+                profileStore.save(profiles)
+            } catch (error: Exception) {
+                _notices.tryEmit("保存主机配置失败：${friendlyError(error)}")
+            }
+        }
     }
 
     fun connect(profile: SshProfile) {
@@ -495,6 +636,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         connectJob?.cancel()
         refreshJob?.cancel()
         terminalGeneration++
+        windowListings.invalidate()
+        resetWindowObserver()
         _screen.value = AppScreen.Windows(profile.id)
         _connection.value = ConnectionState.Connecting(profile)
         _windows.value = emptyList()
@@ -505,7 +648,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 val info = sshManager.connect(profile)
                 _connection.value = ConnectionState.Connected(info)
-                refreshWindowsInternal()
+                windowRefresher.run()
                 startAutoRefresh()
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
@@ -558,22 +701,34 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             _refreshing.value = true
             try {
-                refreshWindowsInternal()
+                windowRefresher.run()
             } finally {
                 _refreshing.value = false
             }
         }
     }
 
+    /** Asks for a window listing without waiting; merges with any listing already queued. */
+    private fun requestWindowRefresh() {
+        windowRefresher.request()
+    }
+
+    /** The single consumer behind [windowRefresher]; never call it directly. */
     private suspend fun refreshWindowsInternal() {
+        // A request queued behind a disconnect or reconnect must not report that transient state.
+        if (_connection.value !is ConnectionState.Connected) return
+        val ticket = windowListings.begin()
         try {
             val latest = sshManager.listWindows()
-            _windows.value = latest
+            if (!applyWindowListing(ticket, latest)) return
             _dashboardMessage.value = null
             _selectedWindow.value?.let { selected ->
                 _selectedWindow.value = latest.firstOrNull { it.windowId == selected.windowId } ?: selected
             }
         } catch (error: Throwable) {
+            if (error is CancellationException) throw error
+            // A newer listing (or a replaced connection) already decided the current state.
+            if (windowListings.isSuperseded(ticket)) return
             _dashboardMessage.value = friendlyError(error)
             if (error is NoActiveConnectionException) {
                 val profile = currentProfile() ?: return
@@ -589,20 +744,112 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private fun isConnectionFailure(error: Throwable): Boolean =
         error is NoActiveConnectionException || error is JSchException || error is IOException
 
+    /** Applies [latest] unless a listing that started later was applied already. */
+    private fun applyWindowListing(ticket: Long, latest: List<TmuxWindow>): Boolean {
+        if (!windowListings.tryApply(ticket)) return false
+        _windows.value = latest
+        ensureWindowObserver(latest)
+        return true
+    }
+
     private fun startAutoRefresh() {
         refreshJob?.cancel()
         refreshJob = viewModelScope.launch {
             while (isActive && _connection.value is ConnectionState.Connected) {
-                // The dashboard benefits from quick discovery. Inside a live terminal, polling via
-                // a second SSH channel less often reduces network contention and battery use.
-                delay(if (_screen.value == AppScreen.Terminal) 15_000 else 5_000)
+                // The poll is a fallback while tmux notifications drive the list, and the only
+                // source of changes while no session exists (nothing to attach an observer to).
+                val observed = windowObserverActive.value
+                val interval = windowPollIntervalMillis(
+                    onTerminal = _screen.value == AppScreen.Terminal,
+                    observerActive = observed
+                )
+                // Re-plan as soon as the observer starts or stops instead of finishing a long wait.
+                val observerChanged = withTimeoutOrNull(interval) {
+                    windowObserverActive.first { it != observed }
+                }
+                if (observerChanged != null) continue
                 if (!appInForeground) {
                     // Each poll opens an SSH exec channel; don't wake the radio in the background.
                     // Returning to the foreground already runs a connection health check.
                     appForeground.first { it }
                     continue
                 }
-                if (_screen.value !is AppScreen.ProfileEditor) refreshWindowsInternal()
+                if (_screen.value !is AppScreen.ProfileEditor) windowRefresher.run()
+            }
+        }
+    }
+
+    /**
+     * Keeps one tmux control-mode observer attached while at least one session exists, so window
+     * adds, closes, renames and selections refresh the list immediately.
+     */
+    private fun ensureWindowObserver(windows: List<TmuxWindow>) {
+        if (windows.isEmpty() || _connection.value !is ConnectionState.Connected) return
+        if (windowObserverActive.value || windowObserverJob?.isActive == true) return
+        val now = SystemClock.elapsedRealtime()
+        if (now < windowObserverRetryAt) return
+        val token = ++windowObserverToken
+        windowObserverStartedAt = now
+        windowObserverJob = viewModelScope.launch {
+            try {
+                sshManager.startWindowEventObserver(
+                    onTopologyChanged = ::onWindowTopologyChanged,
+                    onClosed = { established ->
+                        viewModelScope.launch { onWindowObserverClosed(token, established) }
+                    }
+                )
+                if (token == windowObserverToken) windowObserverActive.value = true
+            } catch (error: Throwable) {
+                if (error is CancellationException) throw error
+                // The next poll retries; keep polling at the faster cadence meanwhile.
+                if (token == windowObserverToken) {
+                    windowObserverRetryAt =
+                        SystemClock.elapsedRealtime() + WINDOW_OBSERVER_FLAPPING_BACKOFF_MILLIS
+                }
+            }
+        }
+    }
+
+    private fun onWindowObserverClosed(token: Int, established: Boolean) {
+        if (token != windowObserverToken) return
+        // Invalidate the token so a start that is still finishing cannot mark this one active.
+        windowObserverToken++
+        windowObserverActive.value = false
+        val now = SystemClock.elapsedRealtime()
+        windowObserverRetryAt = when {
+            // tmux refused the attach (for example a version without `attach-session -f`).
+            !established -> now + WINDOW_OBSERVER_UNSUPPORTED_BACKOFF_MILLIS
+            now - windowObserverStartedAt < WINDOW_OBSERVER_MIN_LIFETIME_MILLIS ->
+                now + WINDOW_OBSERVER_FLAPPING_BACKOFF_MILLIS
+            else -> 0L
+        }
+        // Its session was killed, the server exited or the transport broke. Relisting re-attaches
+        // to a surviving session, or reports the broken connection.
+        if (established) onWindowTopologyChanged()
+    }
+
+    private fun resetWindowObserver() {
+        // SshManager.connect/disconnect close the observer channel itself.
+        windowObserverJob?.cancel()
+        windowObserverJob = null
+        windowObserverToken++
+        windowObserverActive.value = false
+        windowObserverRetryAt = 0L
+    }
+
+    /** Called on an SSH reader thread for each tmux notification that changes the window list. */
+    private fun onWindowTopologyChanged() {
+        // One new-window emits select, add and two renames within milliseconds; let it settle.
+        if (!topologyRefreshScheduled.compareAndSet(false, true)) return
+        viewModelScope.launch {
+            try {
+                delay(TOPOLOGY_EVENT_SETTLE_MILLIS)
+            } finally {
+                topologyRefreshScheduled.set(false)
+            }
+            // Returning to the foreground relists anyway, so don't open channels in the background.
+            if (appInForeground && _connection.value is ConnectionState.Connected) {
+                requestWindowRefresh()
             }
         }
     }
@@ -640,8 +887,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                     model = model,
                     thinkingEffort = thinkingEffort
                 )
+                val ticket = windowListings.begin()
                 val latest = sshManager.listWindows()
-                _windows.value = latest
+                applyWindowListing(ticket, latest)
                 _dashboardMessage.value = null
                 val createdWindow = latest.firstOrNull { it.sessionName == safeName }
                 if (launchPi) {
@@ -798,15 +1046,6 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                             imageTerminal.mirrorKittyGraphicsTo(terminal)
                         }
                     },
-                    onSessionRenamed = {
-                        viewModelScope.launch {
-                            if (generation == terminalGeneration &&
-                                _connection.value is ConnectionState.Connected
-                            ) {
-                                refreshWindowsInternal()
-                            }
-                        }
-                    },
                     onClosed = { exitCode ->
                         viewModelScope.launch {
                             if (generation == terminalGeneration) {
@@ -879,8 +1118,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 // Some vendor ROMs reclaim the app while Android's document picker is open. The
                 // activity-result URI survives, so wait briefly for the persisted SSH target to
                 // reconnect instead of discarding the selected file.
-                val firstName = resolveUploadName(files.first())
-                _uploadProgress.value = FileUploadProgress(firstName, 1, files.size, 0, -1)
+                val names = files.map(::resolveUploadName)
+                _uploadProgress.value = FileUploadProgress(names.first(), 1, files.size, 0, -1)
                 var reconnectChecks = 0
                 while (_connection.value !is ConnectionState.Connected && reconnectChecks < 60) {
                     delay(500)
@@ -891,21 +1130,21 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 val selected = _selectedWindow.value
                     ?: throw IllegalStateException("之前的终端窗口已不存在")
-                files.forEachIndexed { index, uri ->
-                    val name = resolveUploadName(uri)
-                    _uploadProgress.value = FileUploadProgress(name, index + 1, files.size, 0, -1)
-                    var lastProgressAt = 0L
-                    val uploaded = sshManager.uploadFile(uri, name) { sent, total ->
-                        val now = System.currentTimeMillis()
-                        if (now - lastProgressAt >= 100 || sent == 0L || total > 0 && sent >= total) {
-                            lastProgressAt = now
-                            _uploadProgress.value = FileUploadProgress(
-                                name, index + 1, files.size, sent, total
-                            )
-                        }
+                var lastProgressAt = 0L
+                var lastProgressIndex = -1
+                val uploaded = sshManager.uploadFiles(files.zip(names)) { index, sent, total ->
+                    val now = System.currentTimeMillis()
+                    if (index != lastProgressIndex || now - lastProgressAt >= 100 || sent == 0L ||
+                        total > 0 && sent >= total
+                    ) {
+                        lastProgressIndex = index
+                        lastProgressAt = now
+                        _uploadProgress.value = FileUploadProgress(
+                            names[index], index + 1, files.size, sent, total
+                        )
                     }
-                    uploadedPaths += uploaded.remotePath
                 }
+                uploaded.mapTo(uploadedPaths) { it.remotePath }
                 clearModifiers()
                 val insertion = if (isPiWindow(selected)) {
                     buildPiUploadInsertion(uploadedPaths)
@@ -996,7 +1235,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             } else profile
         }
         _profiles.value = updated
-        profileStore.save(updated)
+        persistProfiles(updated)
         updatedProfile?.let { profile ->
             _connection.value = when (val state = _connection.value) {
                 is ConnectionState.Connecting -> state.copy(profile = profile)
@@ -1031,11 +1270,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             restoreStore.saveDashboard(profileId)
             _screen.value = AppScreen.Windows(profileId)
             scheduleWarmTerminalClose()
-            // Refresh on entry as a fallback for older tmux versions that cannot provide control
-            // mode rename notifications. The dashboard should never require a manual refresh.
-            if (_connection.value is ConnectionState.Connected) {
-                viewModelScope.launch { refreshWindowsInternal() }
-            }
+            // Refresh on entry as a fallback for tmux versions without the control-mode observer
+            // (and for command changes it cannot see). The dashboard never needs a manual refresh.
+            if (_connection.value is ConnectionState.Connected) requestWindowRefresh()
         } ?: disconnectAndShowHosts()
     }
 
@@ -1084,8 +1321,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 sshManager.closeTerminal()
                 sshManager.terminateSession(window.sessionId)
+                val ticket = windowListings.begin()
                 val latest = sshManager.listWindows()
-                _windows.value = latest
+                applyWindowListing(ticket, latest)
                 _dashboardMessage.value = null
 
                 val nextWindow = latest.firstOrNull {
@@ -1106,7 +1344,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
                 _notices.tryEmit(friendlyError(error))
-                refreshWindowsInternal()
+                windowRefresher.run()
 
                 if (_screen.value == AppScreen.Terminal &&
                     _connection.value is ConnectionState.Connected
@@ -1141,6 +1379,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         hideRecoveryStatus()
         connectJob?.cancel()
         refreshJob?.cancel()
+        windowListings.invalidate()
+        resetWindowObserver()
         terminalGeneration++
         activeTerminalWindowId = null
         imageCheckpoint = null
@@ -1262,5 +1502,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
         private const val MAX_UPLOAD_FILES = 20
         private const val WARM_TERMINAL_REUSE_MILLIS = 30_000L
         private const val RECOVERY_COMPLETE_VISIBLE_MILLIS = 1_600L
+        private const val TOPOLOGY_EVENT_SETTLE_MILLIS = 300L
+        private const val WINDOW_OBSERVER_MIN_LIFETIME_MILLIS = 5_000L
+        private const val WINDOW_OBSERVER_FLAPPING_BACKOFF_MILLIS = 30_000L
+        private const val WINDOW_OBSERVER_UNSUPPORTED_BACKOFF_MILLIS = 5 * 60_000L
     }
 }
