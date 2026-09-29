@@ -17,6 +17,7 @@ import com.tmuxer.app.data.AuthType
 import com.tmuxer.app.data.ConnectionInfo
 import com.tmuxer.app.data.SshProfile
 import com.tmuxer.app.data.TmuxWindow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -134,6 +135,13 @@ class SshManager(context: Context) {
     private var imageReader: Job? = null
     private var sessionEventReader: Job? = null
     private var terminalResizeJob: Job? = null
+    // Guards the connection/terminal fields below together with their generations. Blocking JSch
+    // connects cannot be interrupted, so a request that finishes after a newer connect, open or
+    // close compares its generation here and discards its own session or channel instead of
+    // overwriting (and leaking) the newer one.
+    private val stateLock = Any()
+    private var connectGeneration = 0L
+    private var terminalGeneration = 0L
     private val terminalWrites = Channel<TerminalWrite>(Channel.UNLIMITED)
 
     init {
@@ -152,6 +160,7 @@ class SshManager(context: Context) {
 
     suspend fun connect(profile: SshProfile): ConnectionInfo = withContext(Dispatchers.IO) {
         disconnectBlocking()
+        val generation = synchronized(stateLock) { ++connectGeneration }
         hostKeyRepository.resetObservation()
 
         val jsch = JSch().apply {
@@ -183,7 +192,10 @@ class SshManager(context: Context) {
 
         try {
             newSession.connect(15_000)
-            session = newSession
+            val claimed = synchronized(stateLock) {
+                (generation == connectGeneration && isActive).also { if (it) session = newSession }
+            }
+            if (!claimed) throw CancellationException("SSH connect superseded")
             val keyBytes = Base64.decode(newSession.hostKey.key, Base64.DEFAULT)
             ConnectionInfo(
                 profile = profile,
@@ -495,13 +507,14 @@ class SshManager(context: Context) {
     ) = withContext(Dispatchers.IO) {
         require(sessionId.matches(Regex("\\$[0-9]+"))) { "无效的 tmux 会话" }
         require(windowId.matches(Regex("@[0-9]+"))) { "无效的 tmux 窗口" }
-        closeTerminalBlocking()
+        val generation = closeTerminalBlocking()
 
         if (captureImages) {
             // Workspaces created before OSC 8 image links used a private graphics side stream.
             // Keep opening it when the legacy window option is present; new workspaces skip it.
             val imageStreamOpened = runCatching {
                 openImageStream(
+                    generation = generation,
                     windowId = windowId,
                     checkpoint = imageCheckpoint,
                     onImageBytes = onImageBytes,
@@ -534,16 +547,33 @@ class SshManager(context: Context) {
         val output = channel.outputStream
         val error = ByteArrayOutputStream()
         channel.setErrStream(error)
-        channel.connect(12_000)
+        try {
+            channel.connect(12_000)
+        } catch (connectError: Throwable) {
+            runCatching { channel.disconnect() }
+            throw connectError
+        }
 
-        terminalChannel = channel
-        terminalInput = input
-        terminalOutput = output
+        val claimed = synchronized(stateLock) {
+            (generation == terminalGeneration && isActive).also {
+                if (it) {
+                    terminalChannel = channel
+                    terminalInput = input
+                    terminalOutput = output
+                }
+            }
+        }
+        if (!claimed) {
+            runCatching { input.close() }
+            runCatching { output.close() }
+            runCatching { channel.disconnect() }
+            throw CancellationException("Terminal open superseded")
+        }
         // A lightweight tmux control client receives metadata notifications but no pane output.
         // This lets external renames (for example pi-auto-session-title) update Android UI state
         // immediately instead of waiting for the periodic SSH poll or a manual refresh.
-        runCatching { openSessionEventStream(sessionId, onSessionRenamed) }
-        terminalReader = ioScope.launch {
+        runCatching { openSessionEventStream(generation, sessionId, onSessionRenamed) }
+        val reader = ioScope.launch {
             val buffer = ByteArray(16 * 1024)
             try {
                 while (isActive && channel.isConnected) {
@@ -558,23 +588,32 @@ class SshManager(context: Context) {
             } finally {
                 // A stale reader must never mark a newer terminal as disconnected. This can happen
                 // while the IME is animating and Compose is relaying a new PTY size.
-                if (terminalChannel === channel) {
-                    terminalChannel = null
-                    terminalInput = null
-                    terminalOutput = null
+                val current = synchronized(stateLock) {
+                    (terminalChannel === channel).also {
+                        if (it) {
+                            terminalChannel = null
+                            terminalInput = null
+                            terminalOutput = null
+                            terminalReader = null
+                        }
+                    }
+                }
+                if (current) {
                     val errorBytes = error.toByteArray()
                     if (errorBytes.isNotEmpty()) onBytes(errorBytes, errorBytes.size)
                     onClosed(channel.exitStatus)
                 }
             }
         }
+        synchronized(stateLock) { if (terminalChannel === channel) terminalReader = reader }
     }
 
     private fun openSessionEventStream(
+        generation: Long,
         sessionId: String,
         onSessionRenamed: () -> Unit
     ) {
-        closeSessionEventStreamBlocking()
+        // closeTerminalBlocking already closed the previous observer for this generation.
         val channel = requireSession().openChannel("exec") as ChannelExec
         channel.setCommand(
             withRemoteExecutablePath(
@@ -597,10 +636,22 @@ class SshManager(context: Context) {
             throw error
         }
 
-        sessionEventChannel = channel
-        sessionEventInput = input
-        sessionEventOutput = output
-        sessionEventReader = ioScope.launch {
+        val claimed = synchronized(stateLock) {
+            (generation == terminalGeneration).also {
+                if (it) {
+                    sessionEventChannel = channel
+                    sessionEventInput = input
+                    sessionEventOutput = output
+                }
+            }
+        }
+        if (!claimed) {
+            runCatching { input.close() }
+            runCatching { output.close() }
+            runCatching { channel.disconnect() }
+            return
+        }
+        val reader = ioScope.launch {
             try {
                 input.bufferedReader(Charsets.UTF_8).use { reader ->
                     while (isActive && channel.isConnected) {
@@ -611,19 +662,23 @@ class SshManager(context: Context) {
             } catch (_: Throwable) {
                 // Closing or replacing a terminal interrupts the blocking control-mode read.
             } finally {
-                if (sessionEventChannel === channel) {
-                    sessionEventChannel = null
-                    sessionEventInput = null
-                    sessionEventOutput = null
-                    sessionEventReader = null
+                synchronized(stateLock) {
+                    if (sessionEventChannel === channel) {
+                        sessionEventChannel = null
+                        sessionEventInput = null
+                        sessionEventOutput = null
+                        sessionEventReader = null
+                    }
                 }
                 runCatching { output.close() }
                 runCatching { channel.disconnect() }
             }
         }
+        synchronized(stateLock) { if (sessionEventChannel === channel) sessionEventReader = reader }
     }
 
     private fun openImageStream(
+        generation: Long,
         windowId: String,
         checkpoint: ImageStreamCheckpoint?,
         onImageBytes: (ByteArray, Int) -> Unit,
@@ -675,10 +730,21 @@ class SshManager(context: Context) {
             runCatching { channel.disconnect() }
             throw error
         }
-        imageChannel = channel
-        imageInput = input
+        val claimed = synchronized(stateLock) {
+            (generation == terminalGeneration).also {
+                if (it) {
+                    imageChannel = channel
+                    imageInput = input
+                }
+            }
+        }
+        if (!claimed) {
+            runCatching { input.close() }
+            runCatching { channel.disconnect() }
+            return false
+        }
         onReplayStart(plan.resumed)
-        imageReader = ioScope.launch {
+        val reader = ioScope.launch {
             val buffer = ByteArray(16 * 1024)
             var replayRemaining = plan.replayBytes
             var streamOffset = plan.firstByte - 1
@@ -722,14 +788,19 @@ class SshManager(context: Context) {
             } catch (_: Throwable) {
                 // Closing or replacing a terminal also interrupts its image stream.
             } finally {
-                if (!replayCompleted && imageChannel === channel) finishReplay()
-                if (imageChannel === channel) {
-                    imageChannel = null
-                    imageInput = null
-                    imageReader = null
+                val current = synchronized(stateLock) {
+                    (imageChannel === channel).also {
+                        if (it) {
+                            imageChannel = null
+                            imageInput = null
+                            imageReader = null
+                        }
+                    }
                 }
+                if (!replayCompleted && current) finishReplay()
             }
         }
+        synchronized(stateLock) { if (imageChannel === channel) imageReader = reader }
         return true
     }
 
@@ -741,18 +812,20 @@ class SshManager(context: Context) {
     fun resizeTerminal(columns: Int, rows: Int) {
         // TerminalView already waits for IME inset animation to settle. Keep only a short guard
         // here to collapse duplicate layouts without making the final tmux reflow feel delayed.
-        terminalResizeJob?.cancel()
-        terminalResizeJob = ioScope.launch {
-            delay(80)
-            val channel = terminalChannel ?: return@launch
-            if (!channel.isConnected) return@launch
-            runCatching {
-                channel.setPtySize(
-                    columns.coerceAtLeast(20),
-                    rows.coerceAtLeast(5),
-                    0,
-                    0
-                )
+        synchronized(stateLock) {
+            terminalResizeJob?.cancel()
+            terminalResizeJob = ioScope.launch {
+                delay(80)
+                val channel = terminalChannel ?: return@launch
+                if (!channel.isConnected) return@launch
+                runCatching {
+                    channel.setPtySize(
+                        columns.coerceAtLeast(20),
+                        rows.coerceAtLeast(5),
+                        0,
+                        0
+                    )
+                }
             }
         }
     }
@@ -812,24 +885,38 @@ class SshManager(context: Context) {
     private fun requireSession(): Session = session?.takeIf { it.isConnected }
         ?: throw NoActiveConnectionException()
 
-    private fun closeTerminalBlocking() {
-        terminalResizeJob?.cancel()
-        terminalResizeJob = null
+    /** Closes the terminal and its side streams, returning the generation of the next open. */
+    private fun closeTerminalBlocking(): Long {
+        val generation: Long
+        val resizeJob: Job?
+        val reader: Job?
+        val input: InputStream?
+        val output: OutputStream?
+        val channel: ChannelExec?
+        val graphicsReader: Job?
+        val graphicsInput: InputStream?
+        val graphicsChannel: ChannelExec?
         // Clear identity first so the reader's finally block knows this is an intentional close.
-        val reader = terminalReader
-        val input = terminalInput
-        val output = terminalOutput
-        val channel = terminalChannel
-        val graphicsReader = imageReader
-        val graphicsInput = imageInput
-        val graphicsChannel = imageChannel
-        terminalReader = null
-        terminalInput = null
-        terminalOutput = null
-        terminalChannel = null
-        imageReader = null
-        imageInput = null
-        imageChannel = null
+        synchronized(stateLock) {
+            generation = ++terminalGeneration
+            resizeJob = terminalResizeJob
+            reader = terminalReader
+            input = terminalInput
+            output = terminalOutput
+            channel = terminalChannel
+            graphicsReader = imageReader
+            graphicsInput = imageInput
+            graphicsChannel = imageChannel
+            terminalResizeJob = null
+            terminalReader = null
+            terminalInput = null
+            terminalOutput = null
+            terminalChannel = null
+            imageReader = null
+            imageInput = null
+            imageChannel = null
+        }
+        resizeJob?.cancel()
         closeSessionEventStreamBlocking()
         reader?.cancel()
         graphicsReader?.cancel()
@@ -838,17 +925,24 @@ class SshManager(context: Context) {
         runCatching { channel?.disconnect() }
         runCatching { graphicsInput?.close() }
         runCatching { graphicsChannel?.disconnect() }
+        return generation
     }
 
     private fun closeSessionEventStreamBlocking() {
-        val reader = sessionEventReader
-        val input = sessionEventInput
-        val output = sessionEventOutput
-        val channel = sessionEventChannel
-        sessionEventReader = null
-        sessionEventInput = null
-        sessionEventOutput = null
-        sessionEventChannel = null
+        val reader: Job?
+        val input: InputStream?
+        val output: OutputStream?
+        val channel: ChannelExec?
+        synchronized(stateLock) {
+            reader = sessionEventReader
+            input = sessionEventInput
+            output = sessionEventOutput
+            channel = sessionEventChannel
+            sessionEventReader = null
+            sessionEventInput = null
+            sessionEventOutput = null
+            sessionEventChannel = null
+        }
         reader?.cancel()
         runCatching { input?.close() }
         runCatching { output?.close() }
@@ -857,8 +951,12 @@ class SshManager(context: Context) {
 
     private fun disconnectBlocking() {
         closeTerminalBlocking()
-        runCatching { session?.disconnect() }
-        session = null
+        // Advancing the generation makes any connect still in flight discard its session.
+        val previous = synchronized(stateLock) {
+            connectGeneration++
+            session.also { session = null }
+        }
+        runCatching { previous?.disconnect() }
         synchronized(piModelCache) { piModelCache.clear() }
     }
 

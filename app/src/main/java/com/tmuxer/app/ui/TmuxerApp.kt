@@ -171,7 +171,9 @@ import com.tmuxer.app.ui.theme.RaisedSurface
 import com.tmuxer.app.ui.theme.TerminalBlue
 import com.tmuxer.app.ui.theme.TextPrimary
 import com.tmuxer.app.ui.theme.TextSecondary
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
@@ -1940,14 +1942,22 @@ private fun RemoteDirectoryPicker(
     var loading by remember { mutableStateOf(true) }
     var error by remember { mutableStateOf<String?>(null) }
     var showHiddenDirectories by remember { mutableStateOf(false) }
+    var loadJob by remember { mutableStateOf<Job?>(null) }
 
     fun load(path: String) {
+        // Only the latest navigation may publish; a slower earlier listing would otherwise
+        // replace it and make "选择此目录" submit the wrong path.
+        loadJob?.cancel()
         loading = true
         error = null
-        scope.launch {
-            runCatching { onLoad(path) }
-                .onSuccess { listing = it }
-                .onFailure { error = it.message ?: "无法读取远程目录" }
+        loadJob = scope.launch {
+            try {
+                listing = onLoad(path)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                error = failure.message ?: "无法读取远程目录"
+            }
             loading = false
         }
     }

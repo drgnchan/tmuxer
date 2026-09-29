@@ -31,7 +31,9 @@ import com.tmuxer.app.terminal.TerminalEmulator
 import com.tmuxer.app.terminal.TerminalTheme
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
@@ -405,6 +407,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 return
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
+                // A superseded attempt can still fail after a newer connect has succeeded; it must
+                // not tear that connection down.
+                currentCoroutineContext().ensureActive()
                 lastError = error
                 sshManager.disconnect()
                 if (attempt < retryDelays.size && appInForeground) {
@@ -493,6 +498,7 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 startAutoRefresh()
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
+                ensureActive()
                 sshManager.disconnect()
                 _connection.value = ConnectionState.Failed(profile, friendlyError(error))
             }
