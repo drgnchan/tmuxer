@@ -25,6 +25,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
@@ -126,8 +127,52 @@ internal fun sshKeyType(blob: ByteArray): String? {
 
 internal fun jschHostAlias(host: String, port: Int): String = if (port == 22) host else "[$host]:$port"
 
-internal fun isTmuxSessionRenamedNotification(line: String): Boolean =
-    line == "%session-renamed" || line.startsWith("%session-renamed ")
+internal enum class TmuxControlLine {
+    /** `%begin`: the start of a command reply block. */
+    BLOCK_BEGIN,
+    /** `%end` or `%error`: the end of a command reply block. */
+    BLOCK_END,
+    /** `%session-changed`: tmux accepted the attach (sent once per attach). */
+    ATTACHED,
+    /** A notification that changes what `tmux list-windows -a` prints. */
+    TOPOLOGY_CHANGED,
+    /** `%exit`: the control client is detaching (for example its session was killed). */
+    EXIT,
+    OTHER
+}
+
+// Verified with tmux 3.7c control mode (`-f no-output,read-only,ignore-size`). A client attached to
+// one session is told about every session: windows of other sessions arrive as the unlinked-*
+// variants, and session create/kill arrives as %sessions-changed. Automatic rename (the pane's
+// current command changing) arrives as %window-renamed, and %window-pane-changed changes which
+// pane's command/path list-windows reports. %layout-change fires on every resize and is ignored.
+private val TMUX_TOPOLOGY_NOTIFICATIONS = hashSetOf(
+    "%window-add",
+    "%window-close",
+    "%window-renamed",
+    "%window-pane-changed",
+    "%unlinked-window-add",
+    "%unlinked-window-close",
+    "%unlinked-window-renamed",
+    "%session-renamed",
+    "%sessions-changed",
+    "%session-window-changed"
+)
+
+internal fun classifyTmuxControlLine(line: String): TmuxControlLine {
+    if (!line.startsWith('%')) return TmuxControlLine.OTHER
+    return when (val name = line.trimEnd('\r').substringBefore(' ')) {
+        "%begin" -> TmuxControlLine.BLOCK_BEGIN
+        "%end", "%error" -> TmuxControlLine.BLOCK_END
+        "%session-changed" -> TmuxControlLine.ATTACHED
+        "%exit" -> TmuxControlLine.EXIT
+        in TMUX_TOPOLOGY_NOTIFICATIONS -> TmuxControlLine.TOPOLOGY_CHANGED
+        else -> TmuxControlLine.OTHER
+    }
+}
+
+private val TMUX_SESSION_ID = Regex("\\$[0-9]+")
+private val TMUX_WINDOW_ID = Regex("@[0-9]+")
 
 private val TERMINAL_IMAGE_RELATIVE_PATH = Regex(
     "(?:images|pi-w[0-9]+(?:\\.stream)?\\.images)/[0-9a-f]{64}\\.(png|jpg|gif|webp|bin)"
@@ -175,6 +220,8 @@ class SshManager(context: Context) {
     private val stateLock = Any()
     private var connectGeneration = 0L
     private var terminalGeneration = 0L
+    // The window event observer lives with the connection rather than the terminal.
+    private var sessionEventGeneration = 0L
     private val terminalWrites = Channel<TerminalWrite>(Channel.UNLIMITED)
 
     init {
@@ -368,7 +415,7 @@ class SshManager(context: Context) {
     }
 
     suspend fun selectWindow(windowId: String) = withContext(Dispatchers.IO) {
-        require(windowId.matches(Regex("@[0-9]+"))) { "无效的 tmux 窗口" }
+        require(windowId.matches(TMUX_WINDOW_ID)) { "无效的 tmux 窗口" }
         val result = execute("tmux select-window -t ${shellQuote(windowId)}")
         if (result.exitCode != 0) {
             throw IllegalStateException(result.error.ifBlank { "切换窗口失败" }.trim())
@@ -376,7 +423,7 @@ class SshManager(context: Context) {
     }
 
     suspend fun terminateSession(sessionId: String) = withContext(Dispatchers.IO) {
-        require(sessionId.matches(Regex("\\$[0-9]+"))) { "无效的 tmux 会话" }
+        require(sessionId.matches(TMUX_SESSION_ID)) { "无效的 tmux 会话" }
         val result = execute("tmux kill-session -t ${shellQuote(sessionId)}")
         if (result.exitCode != 0) {
             throw IllegalStateException(result.error.ifBlank { "退出 tmux 会话失败" }.trim())
@@ -439,11 +486,17 @@ class SshManager(context: Context) {
         }
     }
 
-    suspend fun uploadFile(
-        uri: Uri,
-        displayName: String,
-        onProgress: (bytesSent: Long, totalBytes: Long) -> Unit = { _, _ -> }
-    ): UploadedRemoteFile = withContext(Dispatchers.IO) {
+    /**
+     * Uploads [files] (content URI to display name) over one SFTP channel, preparing and cleaning
+     * the remote upload directory once per batch. Files are sent in order; [onProgress] reports
+     * the zero-based index of the file being sent. A failure removes that file's partial upload
+     * and aborts the batch, leaving earlier files for the 7-day cleanup like single uploads did.
+     */
+    suspend fun uploadFiles(
+        files: List<Pair<Uri, String>>,
+        onProgress: (fileIndex: Int, bytesSent: Long, totalBytes: Long) -> Unit = { _, _, _ -> }
+    ): List<UploadedRemoteFile> = withContext(Dispatchers.IO) {
+        if (files.isEmpty()) return@withContext emptyList()
         runCatching {
             execute(
                 "umask 077; mkdir -p \"\$HOME/.cache/tmuxer/uploads\"; " +
@@ -452,28 +505,57 @@ class SshManager(context: Context) {
             )
         }
         val activeSession = requireSession()
+        val operationJob = coroutineContext[Job]
+        val sftp = activeSession.openChannel("sftp") as ChannelSftp
+        try {
+            sftp.connect(12_000)
+            val home = sftp.home.trimEnd('/')
+            val uploadDirectory = "$home/.cache/tmuxer/uploads"
+            // The prepare command normally created it already, so one stat usually suffices.
+            val directoryExists = runCatching { sftp.stat(uploadDirectory).isDir }.getOrDefault(false)
+            if (!directoryExists) ensureSftpDirectory(sftp, uploadDirectory)
+            runCatching {
+                sftp.chmod(0b111000000, "$home/.cache/tmuxer")
+                sftp.chmod(0b111000000, uploadDirectory)
+            }
+            val usedNames = HashSet<String>()
+            files.mapIndexed { index, (uri, displayName) ->
+                operationJob?.ensureActive()
+                val safeName = sanitizeUploadName(displayName)
+                val stamp = System.currentTimeMillis().toString(36)
+                // Two picks with the same name can land in the same millisecond; never overwrite.
+                val remoteName = "$stamp-$safeName".takeIf(usedNames::add)
+                    ?: "$stamp-$index-$safeName".also(usedNames::add)
+                uploadOne(
+                    sftp = sftp,
+                    uri = uri,
+                    displayName = displayName,
+                    remotePath = "$uploadDirectory/$remoteName",
+                    operationJob = operationJob,
+                    onProgress = { sent, total -> onProgress(index, sent, total) }
+                )
+            }
+        } finally {
+            runCatching { sftp.disconnect() }
+        }
+    }
+
+    private fun uploadOne(
+        sftp: ChannelSftp,
+        uri: Uri,
+        displayName: String,
+        remotePath: String,
+        operationJob: Job?,
+        onProgress: (bytesSent: Long, totalBytes: Long) -> Unit
+    ): UploadedRemoteFile {
         val input = appContext.contentResolver.openInputStream(uri)
             ?: throw IllegalArgumentException("无法读取所选文件")
         val declaredSize = runCatching {
             appContext.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
         }.getOrNull()?.takeIf { it >= 0 } ?: -1L
-        var channel: ChannelSftp? = null
-        var remotePath: String? = null
         var completed = false
         try {
-            val sftp = (activeSession.openChannel("sftp") as ChannelSftp).also { channel = it }
-            sftp.connect(12_000)
-            val home = sftp.home.trimEnd('/')
-            val uploadDirectory = "$home/.cache/tmuxer/uploads"
-            ensureSftpDirectory(sftp, uploadDirectory)
-            runCatching {
-                sftp.chmod(0b111000000, "$home/.cache/tmuxer")
-                sftp.chmod(0b111000000, uploadDirectory)
-            }
-            val safeName = sanitizeUploadName(displayName)
-            remotePath = "$uploadDirectory/${System.currentTimeMillis().toString(36)}-$safeName"
             var transferred = 0L
-            val operationJob = coroutineContext[Job]
             val monitor = object : SftpProgressMonitor {
                 private var total = declaredSize
 
@@ -497,11 +579,10 @@ class SshManager(context: Context) {
             }
             runCatching { sftp.chmod(0b110000000, remotePath) }
             completed = true
-            UploadedRemoteFile(displayName, remotePath, transferred)
+            return UploadedRemoteFile(displayName, remotePath, transferred)
         } finally {
-            if (!completed) remotePath?.let { path -> runCatching { channel?.rm(path) } }
+            if (!completed) runCatching { sftp.rm(remotePath) }
             runCatching { input.close() }
-            runCatching { channel?.disconnect() }
         }
     }
 
@@ -541,11 +622,10 @@ class SshManager(context: Context) {
         onImageReplayStart: (Boolean) -> Unit,
         onImageCheckpoint: (ImageStreamCheckpoint) -> Unit,
         onImageReplayComplete: () -> Unit,
-        onSessionRenamed: () -> Unit,
         onClosed: (Int) -> Unit
     ) = withContext(Dispatchers.IO) {
-        require(sessionId.matches(Regex("\\$[0-9]+"))) { "无效的 tmux 会话" }
-        require(windowId.matches(Regex("@[0-9]+"))) { "无效的 tmux 窗口" }
+        require(sessionId.matches(TMUX_SESSION_ID)) { "无效的 tmux 会话" }
+        require(windowId.matches(TMUX_WINDOW_ID)) { "无效的 tmux 窗口" }
         val generation = closeTerminalBlocking()
 
         if (captureImages) {
@@ -608,10 +688,6 @@ class SshManager(context: Context) {
             runCatching { channel.disconnect() }
             throw CancellationException("Terminal open superseded")
         }
-        // A lightweight tmux control client receives metadata notifications but no pane output.
-        // This lets external renames (for example pi-auto-session-title) update Android UI state
-        // immediately instead of waiting for the periodic SSH poll or a manual refresh.
-        runCatching { openSessionEventStream(generation, sessionId, onSessionRenamed) }
         val reader = ioScope.launch {
             val buffer = ByteArray(16 * 1024)
             try {
@@ -647,23 +723,34 @@ class SshManager(context: Context) {
         synchronized(stateLock) { if (terminalChannel === channel) terminalReader = reader }
     }
 
-    private fun openSessionEventStream(
-        generation: Long,
-        sessionId: String,
-        onSessionRenamed: () -> Unit
-    ) {
-        // closeTerminalBlocking already closed the previous observer for this generation.
-        val channel = requireSession().openChannel("exec") as ChannelExec
+    /**
+     * Attaches one lightweight tmux control client (no pane output, read-only, no size influence)
+     * for the lifetime of the connection, replacing any previous observer. It attaches without
+     * `-t`, so tmux picks its most recently used session and the attach merely refreshes that
+     * session's activity; which session a plain `tmux attach` elsewhere would choose is unchanged.
+     * The client is told about every session, whichever one it is attached to.
+     *
+     * [onTopologyChanged] runs on an IO thread for each notification that changes the window list.
+     * [onClosed] runs once when the observer ends by itself (tmux exited, its session was killed,
+     * the transport broke) with whether tmux had accepted the attach. It does not run when the
+     * observer is replaced or closed by [connect]/[disconnect].
+     */
+    suspend fun startWindowEventObserver(
+        onTopologyChanged: () -> Unit,
+        onClosed: (established: Boolean) -> Unit
+    ) = withContext(Dispatchers.IO) {
+        val generation = closeSessionEventStreamBlocking()
+        val activeSession = requireSession()
+        val channel = activeSession.openChannel("exec") as ChannelExec
         channel.setCommand(
             withRemoteExecutablePath(
                 "export LANG=C.UTF-8 LC_ALL=C.UTF-8; " +
-                    "exec tmux -C attach-session " +
-                    "-f no-output,read-only,ignore-size -t ${shellQuote(sessionId)}"
+                    "exec tmux -C attach-session -f no-output,read-only,ignore-size"
             )
         )
         val input = channel.inputStream
         // Keep control-mode stdin open for the lifetime of the observer. Closing it makes tmux
-        // detach the client and stops subsequent rename notifications.
+        // detach the client and stops subsequent notifications.
         val output = channel.outputStream
         channel.setErrStream(ByteArrayOutputStream())
         try {
@@ -676,7 +763,7 @@ class SshManager(context: Context) {
         }
 
         val claimed = synchronized(stateLock) {
-            (generation == terminalGeneration).also {
+            (generation == sessionEventGeneration && session === activeSession && isActive).also {
                 if (it) {
                     sessionEventChannel = channel
                     sessionEventInput = input
@@ -688,29 +775,44 @@ class SshManager(context: Context) {
             runCatching { input.close() }
             runCatching { output.close() }
             runCatching { channel.disconnect() }
-            return
+            throw CancellationException("Window event observer superseded")
         }
         val reader = ioScope.launch {
+            var established = false
+            var inReplyBlock = false
             try {
                 input.bufferedReader(Charsets.UTF_8).use { reader ->
-                    while (isActive && channel.isConnected) {
+                    while (isActive) {
                         val line = reader.readLine() ?: break
-                        if (isTmuxSessionRenamedNotification(line)) onSessionRenamed()
+                        when (classifyTmuxControlLine(line)) {
+                            TmuxControlLine.BLOCK_BEGIN -> inReplyBlock = true
+                            TmuxControlLine.BLOCK_END -> inReplyBlock = false
+                            TmuxControlLine.ATTACHED -> established = true
+                            TmuxControlLine.TOPOLOGY_CHANGED -> {
+                                val current = synchronized(stateLock) { sessionEventChannel === channel }
+                                if (current && !inReplyBlock) onTopologyChanged()
+                            }
+                            TmuxControlLine.EXIT -> break
+                            TmuxControlLine.OTHER -> Unit
+                        }
                     }
                 }
             } catch (_: Throwable) {
-                // Closing or replacing a terminal interrupts the blocking control-mode read.
+                // Closing or replacing the observer interrupts the blocking control-mode read.
             } finally {
-                synchronized(stateLock) {
-                    if (sessionEventChannel === channel) {
-                        sessionEventChannel = null
-                        sessionEventInput = null
-                        sessionEventOutput = null
-                        sessionEventReader = null
+                val current = synchronized(stateLock) {
+                    (sessionEventChannel === channel).also {
+                        if (it) {
+                            sessionEventChannel = null
+                            sessionEventInput = null
+                            sessionEventOutput = null
+                            sessionEventReader = null
+                        }
                     }
                 }
                 runCatching { output.close() }
                 runCatching { channel.disconnect() }
+                if (current) onClosed(established)
             }
         }
         synchronized(stateLock) { if (sessionEventChannel === channel) sessionEventReader = reader }
@@ -843,9 +945,10 @@ class SshManager(context: Context) {
         return true
     }
 
+    /** Queues [bytes] for the terminal. The array is handed over: callers must not modify it later. */
     fun writeTerminal(bytes: ByteArray) {
         val output = terminalOutput ?: return
-        terminalWrites.trySend(TerminalWrite(output, bytes.copyOf()))
+        terminalWrites.trySend(TerminalWrite(output, bytes))
     }
 
     fun resizeTerminal(columns: Int, rows: Int) {
@@ -964,7 +1067,6 @@ class SshManager(context: Context) {
             imageChannel = null
         }
         resizeJob?.cancel()
-        closeSessionEventStreamBlocking()
         reader?.cancel()
         graphicsReader?.cancel()
         runCatching { input?.close() }
@@ -975,12 +1077,15 @@ class SshManager(context: Context) {
         return generation
     }
 
-    private fun closeSessionEventStreamBlocking() {
+    /** Closes the window event observer, returning the generation of the next one. */
+    private fun closeSessionEventStreamBlocking(): Long {
+        val generation: Long
         val reader: Job?
         val input: InputStream?
         val output: OutputStream?
         val channel: ChannelExec?
         synchronized(stateLock) {
+            generation = ++sessionEventGeneration
             reader = sessionEventReader
             input = sessionEventInput
             output = sessionEventOutput
@@ -994,10 +1099,12 @@ class SshManager(context: Context) {
         runCatching { input?.close() }
         runCatching { output?.close() }
         runCatching { channel?.disconnect() }
+        return generation
     }
 
     private fun disconnectBlocking() {
         closeTerminalBlocking()
+        closeSessionEventStreamBlocking()
         // Advancing the generation makes any connect still in flight discard its session.
         val previous = synchronized(stateLock) {
             connectGeneration++

@@ -23,6 +23,9 @@ class SecureProfileStore(context: Context) {
     private val preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
     @Volatile private var payloadUnreadable = false
 
+    // load() runs on the main thread at startup while saves run on a background thread; both
+    // read and update payloadUnreadable and the preferences as one step.
+    @Synchronized
     fun load(): List<SshProfile> {
         val payload = preferences.getString(KEY_PAYLOAD, null)
         val profiles = payload?.let { decryptOrNull(it, KEY_PAYLOAD) }.orEmpty()
@@ -39,6 +42,8 @@ class SecureProfileStore(context: Context) {
         return merged
     }
 
+    /** Does Keystore IPC and AES work: call it off the main thread. */
+    @Synchronized
     fun save(profiles: List<SshProfile>) {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, getOrCreateKey())
