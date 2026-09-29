@@ -83,6 +83,42 @@ internal fun terminalImeReplacement(oldText: String, newText: String): TerminalI
     )
 }
 
+internal data class TerminalImeDeletion(val backspaces: Int, val forwardDeletes: Int)
+
+/**
+ * Converts an IME deletion measured in UTF-16 units into terminal key presses. The shell deletes
+ * one code point per DEL, so an emoji (a surrogate pair) must produce one backspace, not two.
+ * Units outside the known editable context are counted as one character each.
+ */
+internal fun terminalImeDeletion(
+    text: CharSequence,
+    cursor: Int,
+    beforeLength: Int,
+    afterLength: Int,
+    unsentComposingStart: Int = -1,
+    unsentComposingEnd: Int = -1
+): TerminalImeDeletion {
+    val safeCursor = cursor.coerceIn(0, text.length)
+    val safeBefore = beforeLength.coerceAtLeast(0)
+    val safeAfter = afterLength.coerceAtLeast(0)
+
+    val deleteStart = (safeCursor - safeBefore).coerceAtLeast(0)
+    val unknownBefore = safeBefore - (safeCursor - deleteStart)
+    val unsentStart = maxOf(deleteStart, unsentComposingStart)
+    val unsentEnd = minOf(safeCursor, unsentComposingEnd)
+    val unsentCodePoints = if (unsentComposingStart >= 0 && unsentEnd > unsentStart) {
+        Character.codePointCount(text, unsentStart, unsentEnd)
+    } else {
+        0
+    }
+    val backspaces = Character.codePointCount(text, deleteStart, safeCursor) - unsentCodePoints + unknownBefore
+
+    val deleteEnd = (safeCursor + safeAfter).coerceAtMost(text.length)
+    val forwardDeletes = Character.codePointCount(text, safeCursor, deleteEnd) + (safeAfter - (deleteEnd - safeCursor))
+
+    return TerminalImeDeletion(backspaces.coerceAtLeast(0), forwardDeletes)
+}
+
 internal fun terminalPasteInput(text: String, bracketedPasteMode: Boolean): String {
     if (!bracketedPasteMode) return text
     val normalizedText = text.replace("\r\n", "\n").replace('\r', '\n')
@@ -378,9 +414,11 @@ class TerminalView @JvmOverloads constructor(
             0L
         }
         val snapshot = if (snapshotDirty || cachedSnapshot == null) {
+            // Clear before taking the snapshot: a change the IO thread reports while the snapshot
+            // is being copied must leave the flag set so the next frame picks it up.
+            snapshotDirty = false
             emulator?.snapshot(cachedSnapshot)?.also {
                 cachedSnapshot = it
-                snapshotDirty = false
                 renderDirty = true
             }
         } else {
@@ -1470,19 +1508,19 @@ class TerminalView @JvmOverloads constructor(
             val composingStart = content?.let(BaseInputConnection::getComposingSpanStart) ?: -1
             val composingEnd = content?.let(BaseInputConnection::getComposingSpanEnd) ?: -1
             val cursor = content?.let(Selection::getSelectionStart)?.coerceAtLeast(0) ?: 0
-            val deleteStart = (cursor - safeBeforeLength).coerceAtLeast(0)
-            val unsentComposingCharacters = if (
+            val hasUnsentComposition =
                 !composingTextIsSent && composingStart >= 0 && composingEnd > composingStart
-            ) {
-                (minOf(cursor, composingEnd) - maxOf(deleteStart, composingStart)).coerceAtLeast(0)
-            } else {
-                0
-            }
+            val deletion = terminalImeDeletion(
+                text = content ?: "",
+                cursor = cursor,
+                beforeLength = safeBeforeLength,
+                afterLength = safeAfterLength,
+                unsentComposingStart = if (hasUnsentComposition) composingStart else -1,
+                unsentComposingEnd = if (hasUnsentComposition) composingEnd else -1
+            )
 
-            repeat((safeBeforeLength - unsentComposingCharacters).coerceAtLeast(0)) {
-                onInput("\u007F")
-            }
-            repeat(safeAfterLength) { onInput("\u001B[3~") }
+            repeat(deletion.backspaces) { onInput("\u007F") }
+            repeat(deletion.forwardDeletes) { onInput("\u001B[3~") }
             val result = super.deleteSurroundingText(safeBeforeLength, safeAfterLength)
             if (!hasComposingText()) composingTextIsSent = false
             scheduleImeStateUpdate()

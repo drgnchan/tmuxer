@@ -111,6 +111,30 @@ class TerminalEmulatorTest {
     }
 
     @Test
+    fun matchesWcwidthForEmojiAndFormatCharacters() {
+        val terminal = TerminalEmulator(20, 5)
+        // ✅ and ⭐ are East Asian Wide; U+200D (ZWJ) and U+200B are zero-width format characters.
+        terminal.feed("\u2705\u2B50a\u200Bb\u200D".toByteArray())
+
+        val snapshot = terminal.snapshot()
+        assertEquals(2, snapshot.cells[0].width)
+        assertEquals(2, snapshot.cells[2].width)
+        assertEquals("a\u200B", snapshot.cells[4].text)
+        assertEquals("b\u200D", snapshot.cells[5].text)
+        assertEquals(6, snapshot.cursorColumn)
+    }
+
+    @Test
+    fun attachesCombiningMarkToLastColumnWhenWrapIsPending() {
+        val terminal = TerminalEmulator(3, 2)
+        terminal.feed("abe\u0301".toByteArray())
+
+        val snapshot = terminal.snapshot()
+        assertEquals("b", snapshot.cells[1].text)
+        assertEquals("e\u0301", snapshot.cells[2].text)
+    }
+
+    @Test
     fun reusesSnapshotStorageUntilGridDimensionsChange() {
         val terminal = TerminalEmulator(20, 5)
         terminal.feed("A".toByteArray())

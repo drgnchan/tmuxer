@@ -37,6 +37,37 @@ class TerminalImeInputTest {
     }
 
     @Test
+    fun deletingEmojiSendsOneBackspacePerCodePoint() {
+        assertEquals(
+            TerminalImeDeletion(backspaces = 1, forwardDeletes = 0),
+            terminalImeDeletion("a🙂", cursor = 3, beforeLength = 2, afterLength = 0)
+        )
+    }
+
+    @Test
+    fun countsDeletionBeyondKnownContextAsSingleCharacters() {
+        assertEquals(
+            TerminalImeDeletion(backspaces = 1, forwardDeletes = 0),
+            terminalImeDeletion("", cursor = 0, beforeLength = 1, afterLength = 0)
+        )
+    }
+
+    @Test
+    fun skipsBackspacesForUnsentComposition() {
+        assertEquals(
+            TerminalImeDeletion(backspaces = 1, forwardDeletes = 1),
+            terminalImeDeletion(
+                "x你好🙂",
+                cursor = 3,
+                beforeLength = 3,
+                afterLength = 2,
+                unsentComposingStart = 1,
+                unsentComposingEnd = 3
+            )
+        )
+    }
+
+    @Test
     fun wrapsMultilineImeCommitAsBracketedPaste() {
         assertEquals(
             "\u001B[200~first line\nsecond line\u001B[201~",

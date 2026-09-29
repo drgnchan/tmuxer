@@ -40,6 +40,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import java.io.IOException
 import java.net.ConnectException
 import java.net.SocketTimeoutException
 import java.net.UnknownHostException
@@ -541,9 +542,14 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 _connection.value = ConnectionState.Failed(profile, friendlyError(error))
                 refreshJob?.cancel()
             }
-            if (appInForeground) ensureConnectionRestored()
+            // Only a broken transport warrants reconnecting; a tmux-level failure (missing binary,
+            // non-zero exit) would otherwise tear down a healthy terminal and retry pointlessly.
+            if (appInForeground && isConnectionFailure(error)) ensureConnectionRestored()
         }
     }
+
+    private fun isConnectionFailure(error: Throwable): Boolean =
+        error is NoActiveConnectionException || error is JSchException || error is IOException
 
     private fun startAutoRefresh() {
         refreshJob?.cancel()
