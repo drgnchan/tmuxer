@@ -30,17 +30,19 @@
 
 ## 构建
 
-需要 JDK 17 和 Android SDK 36：
+需要 JDK 17–21 和 Android SDK 36（Gradle 8.14 不支持在 JDK 25 上运行）：
 
 ```bash
-./gradlew :app:assembleDebug
+./gradlew :app:assembleRelease
 ```
 
 APK 输出位置：
 
 ```text
-app/build/outputs/apk/debug/app-debug.apk
+app/build/outputs/apk/release/app-release.apk
 ```
+
+release 包启用 R8，并用本机 `~/.android/debug.keystore` 签名，因此可以直接覆盖安装已有版本。更换签名密钥会导致必须卸载重装，已保存的主机配置（绑定设备 Keystore 加密）会丢失。CI 通过仓库 secret `DEBUG_KEYSTORE_BASE64` 使用同一把密钥，并在发布前校验签名证书。
 
 运行测试：
 
