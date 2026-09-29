@@ -461,6 +461,206 @@ class TerminalEmulatorTest {
         assertEquals("aXYdef", row(terminal.snapshot(), 0).trimEnd())
     }
 
+    @Test
+    fun keepsStyledHistoryAfterScrollingAndAcrossColumnResizes() {
+        val terminal = TerminalEmulator(20, 5)
+        val link = "https://example.com/a"
+        terminal.feed(
+            ("\u001B[1;4;31mred\u001B[0m \u001B[44;7m中\u001B[0m e\u0301 " +
+                "\u001B]8;;$link\u001B\\L\u001B]8;;\u001B\\\u001B[42m  \u001B[0m\r\n").toByteArray()
+        )
+        terminal.feed((1..10).joinToString("") { "line$it\r\n" }.toByteArray())
+
+        fun assertFirstHistoryLine(columns: Int) {
+            terminal.scroll(-1000, 1, 1)
+            val snapshot = terminal.snapshot()
+            assertEquals(columns, snapshot.columns)
+            val cells = snapshot.cells
+            assertEquals("red", (0..2).joinToString("") { cells[it].text })
+            assertTrue(cells[0].bold)
+            assertTrue(cells[0].underline)
+            assertEquals(0xFFE06C75.toInt(), cells[0].foreground)
+            assertFalse(cells[3].bold)
+            assertEquals(TERMINAL_DEFAULT_FOREGROUND, cells[3].foreground)
+            assertEquals("中", cells[4].text)
+            assertEquals(2, cells[4].width)
+            assertTrue(cells[4].inverse)
+            assertEquals(0xFF61AFEF.toInt(), cells[4].background)
+            assertEquals(0, cells[5].width)
+            assertEquals("e\u0301", cells[7].text)
+            assertEquals(link, cells[9].hyperlink)
+            assertEquals(null, cells[8].hyperlink)
+            // Trailing blanks with a non-default background survive trimming.
+            assertEquals(0xFF65DDA5.toInt(), cells[10].background)
+            assertEquals(0xFF65DDA5.toInt(), cells[11].background)
+            for (column in 12 until columns) {
+                assertEquals(" ", cells[column].text)
+                assertEquals(1, cells[column].width)
+                assertEquals(TERMINAL_DEFAULT_BACKGROUND, cells[column].background)
+            }
+            assertEquals("line1", row(snapshot, 1).trimEnd())
+            assertFalse(snapshot.cursorVisible)
+            terminal.scroll(1000, 1, 1)
+        }
+
+        assertFirstHistoryLine(20)
+        terminal.resize(40, 5)
+        assertFirstHistoryLine(40)
+        // Narrowing and widening again must not lose history text beyond the narrow width.
+        terminal.feed("\u001B[1;1H".toByteArray())
+        terminal.resize(20, 5)
+        terminal.resize(30, 5)
+        assertFirstHistoryLine(30)
+    }
+
+    @Test
+    fun truncatesHistoryLinesWhenNarrowerThanWrittenWidth() {
+        val terminal = TerminalEmulator(30, 5)
+        terminal.feed(("abcdefghijklmnopqrstuvwxyz0123\r\n" + "\r\n".repeat(5)).toByteArray())
+        terminal.resize(20, 5)
+        terminal.scroll(-1000, 1, 1)
+
+        assertEquals("abcdefghijklmnopqrst", row(terminal.snapshot(), 0))
+
+        // Widening again restores the full line; history was never rewritten.
+        terminal.resize(40, 5)
+        assertEquals("abcdefghijklmnopqrstuvwxyz0123", row(terminal.snapshot(), 0).trimEnd())
+    }
+
+    @Test
+    fun evictsOldestHistoryAndClearsItOnEraseSavedLines() {
+        val terminal = TerminalEmulator(20, 5)
+        terminal.feed((0 until 2_010).joinToString("") { "n$it\r\n" }.toByteArray())
+        terminal.scroll(-10_000, 1, 1)
+        // 2,010 lines scrolled plus the cursor line: history keeps the newest 2,000 (n6..n2005).
+        assertEquals("n6", row(terminal.snapshot(), 0).trimEnd())
+
+        terminal.scroll(10_000, 1, 1)
+        terminal.feed("\u001B[3J".toByteArray())
+        terminal.scroll(-10, 1, 1)
+        assertTrue(terminal.snapshot().cursorVisible)
+    }
+
+    @Test
+    fun keepsViewportAnchoredWhileNewLinesArrive() {
+        val terminal = TerminalEmulator(20, 5)
+        terminal.feed((0 until 20).joinToString("") { "n$it\r\n" }.toByteArray())
+        terminal.scroll(-3, 1, 1)
+        val before = row(terminal.snapshot(), 0)
+        terminal.feed("more\r\nlines\r\n".toByteArray())
+        assertEquals(before, row(terminal.snapshot(), 0))
+    }
+
+    @Test
+    fun remapsDefaultColorsInPackedHistoryOnThemeChange() {
+        val terminal = TerminalEmulator(20, 5)
+        terminal.feed("D\u001B[38;2;1;2;3mX\u001B[0m\u001B[41mB\u001B[0m\r\n".toByteArray())
+        terminal.feed("plain\r\n".repeat(6).toByteArray())
+
+        terminal.setTheme(TerminalTheme.LIGHT)
+        terminal.scroll(-1000, 1, 1)
+        var cells = terminal.snapshot().cells
+        assertEquals(TERMINAL_LIGHT_FOREGROUND, cells[0].foreground)
+        assertEquals(TERMINAL_LIGHT_BACKGROUND, cells[0].background)
+        assertEquals(0xFF010203.toInt(), cells[1].foreground)
+        assertEquals(TERMINAL_LIGHT_BACKGROUND, cells[1].background)
+        assertEquals(TERMINAL_LIGHT_FOREGROUND, cells[2].foreground)
+        assertEquals(0xFFE06C75.toInt(), cells[2].background)
+        assertEquals(TERMINAL_LIGHT_BACKGROUND, cells[19].background)
+        assertEquals(TERMINAL_LIGHT_FOREGROUND, cells[20].foreground)
+
+        terminal.setTheme(TerminalTheme.DARK)
+        cells = terminal.snapshot().cells
+        assertEquals(TERMINAL_DEFAULT_FOREGROUND, cells[0].foreground)
+        assertEquals(TERMINAL_DEFAULT_BACKGROUND, cells[1].background)
+        assertEquals(0xFF010203.toInt(), cells[1].foreground)
+    }
+
+    @Test
+    fun swallowsDcsPayloadsUntilStringTerminator() {
+        val terminal = TerminalEmulator(40, 5)
+        terminal.feed(
+            ("a\u001BPtmux;\u001B\u001B]52;c;aGk=\u0007\u001B\\b" +
+                "\u001BP+q544e\u001B\\c" +
+                "\u001BPq#0;2;0;0;0#0~~@@vv\r\n-\u001B\\d").toByteArray()
+        )
+        assertEquals("abcd", row(terminal.snapshot(), 0).trimEnd())
+        assertEquals(0, terminal.snapshot().cursorRow)
+
+        // Split across packets, and aborted by CAN / SUB.
+        terminal.feed("\u001BPq junk".toByteArray())
+        terminal.feed(" more junk\u001B".toByteArray())
+        terminal.feed("\\e\u001BPjunk\u0018f\u001BPjunk\u001Ag".toByteArray())
+        assertEquals("abcdefg", row(terminal.snapshot(), 0).trimEnd())
+    }
+
+    @Test
+    fun executesC0ControlsInsideCsiAndAbortsOnEscOrCan() {
+        val terminal = TerminalEmulator(20, 5)
+        // CSI 3 <CR> C: the CR executes, then CSI 3 C moves right from column 0.
+        terminal.feed("abcdef\u001B[3\rCX".toByteArray())
+        assertEquals("abcXef", row(terminal.snapshot(), 0).trimEnd())
+
+        // ESC inside CSI abandons it and starts a new sequence; CAN cancels it outright.
+        terminal.feed("\r\u001B[12\u001B[2CY\u001B[5\u0018Z".toByteArray())
+        assertEquals("abYZef", row(terminal.snapshot(), 0).trimEnd())
+
+        // Backspace inside CSI executes without polluting the parameters.
+        terminal.feed("\u001B[1;\b4H*".toByteArray())
+        assertEquals("abY*ef", row(terminal.snapshot(), 0).trimEnd())
+    }
+
+    @Test
+    fun faintDoesNotClearBoldButNormalIntensityDoes() {
+        val terminal = TerminalEmulator(20, 4)
+        terminal.feed("\u001B[1ma\u001B[2mb\u001B[22mc".toByteArray())
+
+        val cells = terminal.snapshot().cells
+        assertTrue(cells[0].bold)
+        assertTrue(cells[1].bold)
+        assertFalse(cells[2].bold)
+    }
+
+    @Test
+    fun decscAndDecrcSaveAndRestoreAttributesAndCharsets() {
+        val terminal = TerminalEmulator(20, 4)
+        terminal.feed(
+            ("\u001B[1;4;7;31;42m\u001B(0\u001B[2;3H\u001B7" +
+                "\u001B[0m\u001B(B\u001B[4;10Hz\u001B8q").toByteArray()
+        )
+
+        val snapshot = terminal.snapshot()
+        val restored = snapshot.cells[1 * 20 + 2]
+        assertEquals("─", restored.text)
+        assertTrue(restored.bold)
+        assertTrue(restored.underline)
+        assertTrue(restored.inverse)
+        assertEquals(0xFFE06C75.toInt(), restored.foreground)
+        assertEquals(0xFF65DDA5.toInt(), restored.background)
+        val plain = snapshot.cells[3 * 20 + 9]
+        assertEquals("z", plain.text)
+        assertFalse(plain.bold)
+        assertEquals(TERMINAL_DEFAULT_FOREGROUND, plain.foreground)
+
+        // CSI s / u still restore only the cursor position.
+        terminal.feed("\u001B[0m\u001B(B\u001B[1;1H\u001B[s\u001B[1;31m\u001B[3;3H\u001B[uw".toByteArray())
+        val cell = terminal.snapshot().cells[0]
+        assertEquals("w", cell.text)
+        assertTrue(cell.bold)
+        assertEquals(0xFFE06C75.toInt(), cell.foreground)
+    }
+
+    @Test
+    fun capsCombiningMarksPerCell() {
+        val terminal = TerminalEmulator(20, 4)
+        terminal.feed(("e" + "\u0301".repeat(10_000) + "x").toByteArray())
+
+        val cells = terminal.snapshot().cells
+        assertTrue(cells[0].text.length <= 32)
+        assertTrue(cells[0].text.startsWith("e\u0301"))
+        assertEquals("x", cells[1].text)
+    }
+
     private fun row(snapshot: TerminalSnapshot, row: Int): String =
         (0 until snapshot.columns).joinToString("") {
             snapshot.cells[row * snapshot.columns + it].text
