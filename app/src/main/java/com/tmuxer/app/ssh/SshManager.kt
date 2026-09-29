@@ -856,28 +856,36 @@ class SshManager(context: Context) {
         val input = channel.inputStream
         val output = ByteArrayOutputStream()
         val buffer = ByteArray(8 * 1024)
-        val startedAt = System.currentTimeMillis()
 
+        // Block on the stream instead of polling available(); a watchdog closes the channel on
+        // timeout, which ends the read.
+        val timedOut = AtomicBoolean(false)
+        val watchdog = ioScope.launch {
+            delay(timeoutMillis)
+            timedOut.set(true)
+            channel.disconnect()
+        }
         try {
             channel.connect(10_000)
-            while (true) {
-                while (input.available() > 0) {
+            try {
+                while (true) {
                     val count = input.read(buffer)
                     if (count < 0) break
                     output.write(buffer, 0, count)
                 }
-                if (channel.isClosed && input.available() == 0) break
-                if (System.currentTimeMillis() - startedAt > timeoutMillis) {
-                    throw java.net.SocketTimeoutException("远程命令执行超时")
-                }
-                Thread.sleep(20)
+            } catch (readError: java.io.IOException) {
+                if (!timedOut.get()) throw readError
             }
+            // exit-status usually follows EOF by a packet; wait briefly for the channel to close.
+            while (!channel.isClosed && !timedOut.get()) Thread.sleep(5)
+            if (timedOut.get()) throw java.net.SocketTimeoutException("远程命令执行超时")
             return CommandResult(
                 output.toString(Charsets.UTF_8.name()),
                 error.toString(Charsets.UTF_8.name()),
                 channel.exitStatus
             )
         } finally {
+            watchdog.cancel()
             channel.disconnect()
         }
     }

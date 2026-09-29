@@ -43,6 +43,29 @@ data class TerminalCell(
     var hyperlink: String? = null
 ) {
     fun duplicate() = copy()
+
+    fun copyFrom(source: TerminalCell) {
+        text = source.text
+        width = source.width
+        foreground = source.foreground
+        background = source.background
+        bold = source.bold
+        underline = source.underline
+        inverse = source.inverse
+        hyperlink = source.hyperlink
+    }
+
+    /** Resets this cell in place; the emulator mutates cells instead of allocating new ones. */
+    fun blank(foreground: Int, background: Int, bold: Boolean, underline: Boolean, inverse: Boolean) {
+        text = " "
+        width = 1
+        this.foreground = foreground
+        this.background = background
+        this.bold = bold
+        this.underline = underline
+        this.inverse = inverse
+        hyperlink = null
+    }
 }
 
 data class TerminalImagePlacement(
@@ -127,6 +150,9 @@ class TerminalEmulator(
 
     private var parserState = ParserState.NORMAL
     private val sequence = StringBuilder()
+    // CSI parameters parsed in place from [sequence]; avoids per-sequence strings and lists.
+    private val csiParameters = IntArray(MAX_CSI_PARAMETERS)
+    private var csiParameterCount = 0
     private var oscSequenceOverflow = false
     private var charsetSequencePending = false
     private var pendingCharsetSlot = 0
@@ -277,16 +303,7 @@ class TerminalEmulator(
         }
         val visibleCells = reusable?.cells ?: freshBuffer(columns, rows)
 
-        fun copyCell(source: TerminalCell, target: TerminalCell) {
-            target.text = source.text
-            target.width = source.width
-            target.foreground = source.foreground
-            target.background = source.background
-            target.bold = source.bold
-            target.underline = source.underline
-            target.inverse = source.inverse
-            target.hyperlink = source.hyperlink
-        }
+        fun copyCell(source: TerminalCell, target: TerminalCell) = target.copyFrom(source)
 
         if (viewportOffset > 0) {
             val firstLine = scrollback.size - viewportOffset
@@ -567,7 +584,7 @@ class TerminalEmulator(
 
     private fun processCsi(char: Char) {
         if (char.code in 0x40..0x7E) {
-            applyCsi(sequence.toString(), char)
+            applyCsi(char)
             sequence.clear()
             parserState = ParserState.NORMAL
         } else if (sequence.length < 256) {
@@ -575,17 +592,61 @@ class TerminalEmulator(
         }
     }
 
-    private fun applyCsi(raw: String, command: Char) {
-        val privateMode = raw.startsWith('?')
-        val clean = raw.trimStart('?', '>', '!')
-            .filter { it.isDigit() || it == ';' || it == ':' }
-        val parameters = if (clean.isEmpty()) {
-            emptyList()
-        } else {
-            clean.split(';').map { token -> token.substringBefore(':').toIntOrNull() ?: 0 }
+    /**
+     * Parses [sequence] into [csiParameters]: leading `?`, `>` and `!` markers are skipped, other
+     * non-parameter characters ignored, colon sub-parameters dropped, and overflowing or empty
+     * values read as 0.
+     */
+    private fun parseCsiParameters() {
+        csiParameterCount = 0
+        var start = 0
+        while (start < sequence.length && sequence[start].let { it == '?' || it == '>' || it == '!' }) {
+            start++
         }
+        var current = 0
+        var overflow = false
+        var inSubParameter = false
+        var sawParameter = false
+        for (position in start until sequence.length) {
+            val char = sequence[position]
+            when {
+                char in '0'..'9' -> {
+                    sawParameter = true
+                    if (!inSubParameter && !overflow) {
+                        val digit = char - '0'
+                        if (current > (Int.MAX_VALUE - digit) / 10) overflow = true
+                        else current = current * 10 + digit
+                    }
+                }
+                char == ':' -> {
+                    sawParameter = true
+                    inSubParameter = true
+                }
+                char == ';' -> {
+                    sawParameter = true
+                    if (csiParameterCount < csiParameters.size) {
+                        csiParameters[csiParameterCount++] = if (overflow) 0 else current
+                    }
+                    current = 0
+                    overflow = false
+                    inSubParameter = false
+                }
+            }
+        }
+        if (sawParameter && csiParameterCount < csiParameters.size) {
+            csiParameters[csiParameterCount++] = if (overflow) 0 else current
+        }
+    }
+
+    private fun parameterOrNull(index: Int): Int? =
+        if (index < csiParameterCount) csiParameters[index] else null
+
+    private fun applyCsi(command: Char) {
+        val prefix = sequence.firstOrNull()
+        val privateMode = prefix == '?'
+        parseCsiParameters()
         fun value(index: Int, fallback: Int = 1): Int =
-            parameters.getOrNull(index)?.takeIf { it != 0 } ?: fallback
+            parameterOrNull(index)?.takeIf { it != 0 } ?: fallback
 
         when (command) {
             'A' -> cursorRow = max(scrollTop.takeIf { cursorRow >= it } ?: 0, cursorRow - value(0))
@@ -606,8 +667,8 @@ class TerminalEmulator(
                 cursorRow = (value(0) - 1).coerceIn(0, rows - 1)
                 cursorColumn = (value(1) - 1).coerceIn(0, columns - 1)
             }
-            'J' -> eraseDisplay(parameters.firstOrNull() ?: 0)
-            'K' -> eraseLine(parameters.firstOrNull() ?: 0)
+            'J' -> eraseDisplay(parameterOrNull(0) ?: 0)
+            'K' -> eraseLine(parameterOrNull(0) ?: 0)
             '@' -> insertCharacters(value(0))
             'P' -> deleteCharacters(value(0))
             'X' -> eraseCharacters(value(0))
@@ -615,7 +676,8 @@ class TerminalEmulator(
             'M' -> deleteLines(value(0))
             'S' -> scrollUp(value(0))
             'T' -> scrollDown(value(0))
-            'm' -> applyStyle(parameters)
+            // CSI > Ps m (xterm modifyOtherKeys) and similar private forms are not SGR.
+            'm' -> if (prefix == null || prefix !in charArrayOf('>', '<', '=', '?')) applyStyle()
             'r' -> {
                 scrollTop = (value(0) - 1).coerceIn(0, rows - 1)
                 scrollBottom = (value(1, rows) - 1).coerceIn(scrollTop, rows - 1)
@@ -629,18 +691,17 @@ class TerminalEmulator(
             'u' -> {
                 // Plain CSI u restores the cursor. Private variants are Kitty keyboard protocol
                 // negotiation; ignore them until input encoding supports the negotiated flags.
-                val prefix = raw.firstOrNull()
                 if (prefix == null || prefix !in charArrayOf('?', '>', '<', '=')) {
                     cursorColumn = savedColumn.coerceIn(0, columns - 1)
                     cursorRow = savedRow.coerceIn(0, rows - 1)
                 }
             }
-            'h', 'l' -> setModes(parameters, privateMode, command == 'h')
-            'n' -> when (parameters.firstOrNull()) {
+            'h', 'l' -> setModes(privateMode, command == 'h')
+            'n' -> when (parameterOrNull(0)) {
                 5 -> reply("\u001B[0n")
                 6 -> reply("\u001B[${cursorRow + 1};${cursorColumn + 1}R")
             }
-            't' -> if (parameters.firstOrNull() == 16) {
+            't' -> if (parameterOrNull(0) == 16) {
                 // tmuxer renders images as one-row links. Reporting a deliberately tall cell makes
                 // Pi reserve one row for Kitty output instead of its normal 20-30 image rows.
                 reply(TERMINAL_IMAGE_LINK_CELL_SIZE_RESPONSE)
@@ -916,7 +977,8 @@ class TerminalEmulator(
             cell.inverse = inverse
             cell.hyperlink = activeHyperlink
             if (glyphWidth == 2) {
-                cells[index(cursorColumn + 1, cursorRow)] = blankCell().apply {
+                cells[index(cursorColumn + 1, cursorRow)].apply {
+                    blankInPlace(this)
                     width = 0
                     hyperlink = activeHyperlink
                 }
@@ -933,10 +995,10 @@ class TerminalEmulator(
         if (column !in 0 until columns) return
         val position = index(column, row)
         when (cells[position].width) {
-            0 -> if (column > 0) cells[index(column - 1, row)] = blankCell()
-            2 -> if (column + 1 < columns) cells[index(column + 1, row)] = blankCell()
+            0 -> if (column > 0) blankInPlace(cells[index(column - 1, row)])
+            2 -> if (column + 1 < columns) blankInPlace(cells[index(column + 1, row)])
         }
-        cells[position] = blankCell()
+        blankInPlace(cells[position])
     }
 
     private fun lineFeed() {
@@ -985,7 +1047,7 @@ class TerminalEmulator(
         val amount = count.coerceAtMost(columns - cursorColumn)
         val rowStart = index(0, cursorRow)
         for (column in columns - 1 downTo cursorColumn + amount) {
-            cells[rowStart + column] = cells[rowStart + column - amount].duplicate()
+            cells[rowStart + column].copyFrom(cells[rowStart + column - amount])
         }
         eraseRange(rowStart + cursorColumn, rowStart + cursorColumn + amount - 1)
     }
@@ -995,7 +1057,7 @@ class TerminalEmulator(
         val amount = count.coerceAtMost(columns - cursorColumn)
         val rowStart = index(0, cursorRow)
         for (column in cursorColumn until columns - amount) {
-            cells[rowStart + column] = cells[rowStart + column + amount].duplicate()
+            cells[rowStart + column].copyFrom(cells[rowStart + column + amount])
         }
         eraseRange(rowStart + columns - amount, rowStart + columns - 1)
     }
@@ -1024,36 +1086,50 @@ class TerminalEmulator(
 
     private fun scrollUp(count: Int) {
         if (!retainScreenContent) return
+        val buffer = cells
         repeat(count.coerceAtMost(scrollBottom - scrollTop + 1)) {
+            val topStart = index(0, scrollTop)
             // tmux reserves its bottom status row and scrolls only 0..rows-2. The removed top
             // line still belongs in local transcript history whenever the region starts at row 0.
+            val recycled: Array<TerminalCell>
             if (scrollTop == 0) {
-                val removedLine = Array(columns) { column ->
-                    cells[index(column, 0)].duplicate()
-                }
-                scrollback.addLast(removedLine)
+                // Hand the top row's cells to history as-is; the rows below move by reference.
+                scrollback.addLast(buffer.copyOfRange(topStart, topStart + columns))
                 if (viewportOffset > 0) viewportOffset++
+                var evicted: Array<TerminalCell>? = null
                 while (scrollback.size > MAX_SCROLLBACK_LINES) {
-                    scrollback.removeFirst()
+                    evicted = scrollback.removeFirst()
                     viewportOffset = viewportOffset.coerceAtMost(scrollback.size)
                 }
+                recycled = evicted?.takeIf { it.size == columns } ?: Array(columns) { defaultCell() }
+            } else {
+                recycled = buffer.copyOfRange(topStart, topStart + columns)
             }
-            for (row in scrollTop until scrollBottom) copyRow(row + 1, row)
-            clearRow(scrollBottom)
+            System.arraycopy(buffer, topStart + columns, buffer, topStart, (scrollBottom - scrollTop) * columns)
+            val bottomStart = index(0, scrollBottom)
+            for (column in 0 until columns) {
+                buffer[bottomStart + column] = recycled[column].also(::blankInPlace)
+            }
         }
     }
 
     private fun scrollDown(count: Int) {
         if (!retainScreenContent) return
+        val buffer = cells
         repeat(count.coerceAtMost(scrollBottom - scrollTop + 1)) {
-            for (row in scrollBottom downTo scrollTop + 1) copyRow(row - 1, row)
-            clearRow(scrollTop)
+            val topStart = index(0, scrollTop)
+            val bottomStart = index(0, scrollBottom)
+            val recycled = buffer.copyOfRange(bottomStart, bottomStart + columns)
+            System.arraycopy(buffer, topStart, buffer, topStart + columns, (scrollBottom - scrollTop) * columns)
+            for (column in 0 until columns) {
+                buffer[topStart + column] = recycled[column].also(::blankInPlace)
+            }
         }
     }
 
     private fun copyRow(from: Int, to: Int) {
         for (column in 0 until columns) {
-            cells[index(column, to)] = cells[index(column, from)].duplicate()
+            cells[index(column, to)].copyFrom(cells[index(column, from)])
         }
     }
 
@@ -1061,16 +1137,17 @@ class TerminalEmulator(
 
     private fun eraseRange(start: Int, end: Int) {
         if (end < start) return
-        for (position in start.coerceAtLeast(0)..end.coerceAtMost(cells.lastIndex)) {
-            cells[position] = blankCell()
+        val buffer = cells
+        for (position in start.coerceAtLeast(0)..end.coerceAtMost(buffer.lastIndex)) {
+            blankInPlace(buffer[position])
         }
     }
 
-    private fun applyStyle(parameters: List<Int>) {
-        val values = if (parameters.isEmpty()) listOf(0) else parameters
+    private fun applyStyle() {
+        if (csiParameterCount == 0) csiParameters[csiParameterCount++] = 0
         var cursor = 0
-        while (cursor < values.size) {
-            when (val code = values[cursor]) {
+        while (cursor < csiParameterCount) {
+            when (val code = csiParameters[cursor]) {
                 0 -> resetStyle()
                 1 -> bold = true
                 2, 22 -> bold = false
@@ -1086,16 +1163,16 @@ class TerminalEmulator(
                 100, 101, 102, 103, 104, 105, 106, 107 -> background = ANSI_COLORS[code - 100 + 8]
                 38, 48 -> {
                     val isForeground = code == 38
-                    when (values.getOrNull(cursor + 1)) {
+                    when (parameterOrNull(cursor + 1)) {
                         5 -> {
-                            val color = xtermColor(values.getOrNull(cursor + 2) ?: 0)
+                            val color = xtermColor(parameterOrNull(cursor + 2) ?: 0)
                             if (isForeground) foreground = color else background = color
                             cursor += 2
                         }
                         2 -> {
-                            val red = (values.getOrNull(cursor + 2) ?: 0).coerceIn(0, 255)
-                            val green = (values.getOrNull(cursor + 3) ?: 0).coerceIn(0, 255)
-                            val blue = (values.getOrNull(cursor + 4) ?: 0).coerceIn(0, 255)
+                            val red = (parameterOrNull(cursor + 2) ?: 0).coerceIn(0, 255)
+                            val green = (parameterOrNull(cursor + 3) ?: 0).coerceIn(0, 255)
+                            val blue = (parameterOrNull(cursor + 4) ?: 0).coerceIn(0, 255)
                             val color = 0xFF000000.toInt() or (red shl 16) or (green shl 8) or blue
                             if (isForeground) foreground = color else background = color
                             cursor += 4
@@ -1107,8 +1184,9 @@ class TerminalEmulator(
         }
     }
 
-    private fun setModes(parameters: List<Int>, privateMode: Boolean, enabled: Boolean) {
-        parameters.forEach { mode ->
+    private fun setModes(privateMode: Boolean, enabled: Boolean) {
+        for (parameterIndex in 0 until csiParameterCount) {
+            val mode = csiParameters[parameterIndex]
             if (privateMode) {
                 when (mode) {
                     25 -> cursorVisible = enabled
@@ -1146,13 +1224,8 @@ class TerminalEmulator(
         inverse = false
     }
 
-    private fun blankCell() = TerminalCell(
-        foreground = foreground,
-        background = background,
-        bold = bold,
-        underline = underline,
-        inverse = inverse
-    )
+    private fun blankInPlace(cell: TerminalCell) =
+        cell.blank(foreground, background, bold, underline, inverse)
 
     private fun index(column: Int, row: Int) = row * columns + column
 
@@ -1203,8 +1276,8 @@ class TerminalEmulator(
 
     private fun mapActiveCharset(char: Char): String {
         val lineDrawing = if (activeCharsetSlot == 0) g0LineDrawing else g1LineDrawing
-        if (!lineDrawing) return char.toString()
-        return DEC_SPECIAL_GRAPHICS[char] ?: char.toString()
+        if (lineDrawing) DEC_SPECIAL_GRAPHICS[char]?.let { return it }
+        return if (char.code < ASCII_STRINGS.size) ASCII_STRINGS[char.code] else char.toString()
     }
 
     private fun wcWidth(codePoint: Int): Int {
@@ -1290,6 +1363,8 @@ class TerminalEmulator(
 
     companion object {
         private const val MAX_SCROLLBACK_LINES = 2_000
+        private const val MAX_CSI_PARAMETERS = 256
+        private val ASCII_STRINGS = Array(128) { it.toChar().toString() }
         private const val MAX_OSC_SEQUENCE_CHARS = 128 * 1024
         private const val MAX_OSC52_BASE64_CHARS = 100_000
         private const val MAX_OSC52_CLIPBOARD_BYTES = 75_000

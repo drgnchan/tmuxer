@@ -48,6 +48,7 @@ private const val MAX_DECODED_IMAGE_PIXELS = 8_000_000L
 private const val MAX_DECODED_IMAGE_DIMENSION = 4_096
 private const val TERMINAL_IMAGE_LINK_PREFIX = "tmuxer-image://"
 private const val MAX_IME_CONTEXT_CHARS = 1_024
+private const val MAX_PARSED_HYPERLINKS = 256
 private const val BRACKETED_PASTE_START = "\u001B[200~"
 private const val BRACKETED_PASTE_END = "\u001B[201~"
 
@@ -174,8 +175,9 @@ internal fun terminalWebUrlFromHyperlink(hyperlink: String?): String? {
     return hyperlink.takeIf { scheme == "http" || scheme == "https" }
 }
 
-private fun terminalHyperlinkIsClickable(hyperlink: String?): Boolean =
-    terminalImagePathFromHyperlink(hyperlink) != null || terminalWebUrlFromHyperlink(hyperlink) != null
+private class ParsedTerminalHyperlink(val imagePath: String?, val webUrl: String?) {
+    val clickable: Boolean get() = imagePath != null || webUrl != null
+}
 
 internal fun decodeTerminalImagePreview(data: ByteArray): Bitmap? {
     if (data.isEmpty()) return null
@@ -276,6 +278,18 @@ class TerminalView @JvmOverloads constructor(
     private var cachedSnapshot: TerminalSnapshot? = null
     @Volatile private var snapshotDirty = true
     @Volatile private var renderDirty = true
+    // Set whenever the bitmap no longer matches [renderedCells] (new bitmap, theme, focus, new
+    // emulator); otherwise only rows whose cells or cursor changed are repainted.
+    @Volatile private var fullRenderRequired = true
+    private val renderCanvas = Canvas()
+    private var renderedCells: Array<TerminalCell>? = null
+    private var renderedColumns = 0
+    private var renderedHadImages = false
+    private var renderedCursorRow = -1
+    private var renderedCursorColumn = -1
+    private var dirtyRows = BooleanArray(0)
+    // Hyperlinks repeat on every cell they cover; parse each distinct one once (UI thread only).
+    private val parsedHyperlinks = HashMap<String, ParsedTerminalHyperlink>()
     private val horizontalPadding = 3f * density
     private val verticalPadding = 2f * density
     private val selectionHandleRadius = 6f * density
@@ -370,6 +384,7 @@ class TerminalView @JvmOverloads constructor(
             field = value
             cursorPaint.color = value.cursorColor
             setBackgroundColor(value.backgroundColor)
+            fullRenderRequired = true
             renderDirty = true
             invalidate()
         }
@@ -385,6 +400,7 @@ class TerminalView @JvmOverloads constructor(
             imageHitTargets.clear()
             webLinkHitTargets.clear()
             snapshotDirty = true
+            fullRenderRequired = true
             renderDirty = true
             appliedColumns = 0
             appliedRows = 0
@@ -427,8 +443,8 @@ class TerminalView @JvmOverloads constructor(
 
         val bitmap = renderedBitmap ?: return
         if (renderDirty) {
-            bitmap.eraseColor(terminalTheme.backgroundColor)
-            drawSnapshot(Canvas(bitmap), snapshot)
+            renderCanvas.setBitmap(bitmap)
+            renderSnapshot(renderCanvas, bitmap, snapshot)
             renderDirty = false
             if (renderStarted != 0L) recordRenderSample(SystemClock.elapsedRealtimeNanos() - renderStarted)
         }
@@ -437,123 +453,182 @@ class TerminalView @JvmOverloads constructor(
         drawTextSelectionHandles(canvas, snapshot)
     }
 
-    private fun drawSnapshot(canvas: Canvas, snapshot: TerminalSnapshot) {
-        imageHitTargets.clear()
-        webLinkHitTargets.clear()
-        for (row in 0 until snapshot.rows) {
-            val rowOffset = row * snapshot.columns
-            val top = verticalPadding + row * lineHeight
-            // Fractional font spacing can leave a one-pixel seam between adjacent background rows.
-            val backgroundTop = floor(top)
-            val backgroundBottom = ceil(top + lineHeight)
-            val baseline = top + baselineOffset
-
-            // Paint backgrounds as runs instead of issuing one draw call per terminal cell.
-            var column = 0
-            while (column < snapshot.columns) {
-                val start = column
-                val first = snapshot.cells[rowOffset + column]
-                val background = if (first.inverse) first.foreground else first.background
-                column++
-                while (column < snapshot.columns) {
-                    val next = snapshot.cells[rowOffset + column]
-                    val nextBackground = if (next.inverse) next.foreground else next.background
-                    if (nextBackground != background) break
-                    column++
-                }
-                if (background != terminalTheme.backgroundColor) {
-                    backgroundPaint.color = background
-                    canvas.drawRect(
-                        horizontalPadding + start * characterWidth,
-                        backgroundTop,
-                        horizontalPadding + column * characterWidth + 0.5f,
-                        backgroundBottom,
-                        backgroundPaint
-                    )
-                }
-            }
-
-            column = 0
-            while (column < snapshot.columns) {
-                val cell = snapshot.cells[rowOffset + column]
-                if (cell.width == 0) {
-                    column++
-                    continue
-                }
-                if (cell.width > 1) {
-                    drawWideGlyph(canvas, cell, column, baseline)
-                    column += cell.width
-                    continue
-                }
-
-                val start = column
-                val clickableLink = terminalHyperlinkIsClickable(cell.hyperlink)
-                val foreground = if (clickableLink) {
-                    terminalTheme.cursorColor
-                } else if (cell.inverse) {
-                    cell.background
-                } else {
-                    cell.foreground
-                }
-                val bold = cell.bold
-                val underline = cell.underline || clickableLink
-                var hasVisibleText = false
-                textRun.clear()
-                while (column < snapshot.columns) {
-                    val next = snapshot.cells[rowOffset + column]
-                    val nextClickableLink = terminalHyperlinkIsClickable(next.hyperlink)
-                    val nextForeground = if (nextClickableLink) {
-                        terminalTheme.cursorColor
-                    } else if (next.inverse) {
-                        next.background
-                    } else {
-                        next.foreground
-                    }
-                    if (next.width != 1 || nextForeground != foreground ||
-                        next.bold != bold || (next.underline || nextClickableLink) != underline ||
-                        next.hyperlink != cell.hyperlink
-                    ) {
+    private fun renderSnapshot(canvas: Canvas, bitmap: Bitmap, snapshot: TerminalSnapshot) {
+        val cursorShown = snapshot.cursorVisible && hasFocus()
+        val cursorRow = if (cursorShown) snapshot.cursorRow else -1
+        val previous = renderedCells
+        val incremental = !fullRenderRequired && previous != null &&
+            previous.size == snapshot.cells.size && renderedColumns == snapshot.columns &&
+            !renderedHadImages && snapshot.images.isEmpty()
+        var dirtyCount = 0
+        if (incremental) {
+            if (dirtyRows.size != snapshot.rows) dirtyRows = BooleanArray(snapshot.rows)
+            for (row in 0 until snapshot.rows) {
+                val rowOffset = row * snapshot.columns
+                var changed = false
+                for (column in 0 until snapshot.columns) {
+                    if (previous!![rowOffset + column] != snapshot.cells[rowOffset + column]) {
+                        changed = true
                         break
                     }
-                    textRun.append(next.text)
-                    if (next.text != " ") hasVisibleText = true
-                    column++
                 }
-                if (hasVisibleText) {
-                    val left = horizontalPadding + start * characterWidth
-                    val expectedWidth = (column - start) * characterWidth
-                    textPaint.color = foreground
-                    textPaint.typeface = terminalTypeface
-                    textPaint.isFakeBoldText = bold
-                    val measuredWidth = textPaint.measureText(textRun, 0, textRun.length)
-                    if (measuredWidth > 0f && abs(measuredWidth - expectedWidth) > 0.5f) {
-                        canvas.save()
-                        canvas.scale(expectedWidth / measuredWidth, 1f, left, baseline)
-                        canvas.drawText(textRun, 0, textRun.length, left, baseline, textPaint)
-                        canvas.restore()
-                    } else {
-                        canvas.drawText(textRun, 0, textRun.length, left, baseline, textPaint)
-                    }
-                }
-                if (underline) {
-                    backgroundPaint.color = foreground
-                    canvas.drawRect(
-                        horizontalPadding + start * characterWidth,
-                        baseline + density,
-                        horizontalPadding + column * characterWidth,
-                        baseline + 1.5f * density,
-                        backgroundPaint
-                    )
-                }
+                dirtyRows[row] = changed
             }
+            if (renderedCursorRow != cursorRow || (cursorShown && renderedCursorColumn != snapshot.cursorColumn)) {
+                if (renderedCursorRow in dirtyRows.indices) dirtyRows[renderedCursorRow] = true
+                if (cursorRow in dirtyRows.indices) dirtyRows[cursorRow] = true
+            }
+            dirtyCount = dirtyRows.count { it }
         }
+
+        imageHitTargets.clear()
+        webLinkHitTargets.clear()
         collectTerminalImageLinkTargets(snapshot)
         collectTerminalWebLinkTargets(snapshot)
-        drawTerminalImages(canvas, snapshot)
-        if (snapshot.cursorVisible && hasFocus()) {
-            val left = horizontalPadding + snapshot.cursorColumn * characterWidth
-            val top = verticalPadding + snapshot.cursorRow * lineHeight
-            canvas.drawRect(left, top, left + characterWidth, top + lineHeight, cursorPaint)
+        if (!incremental || dirtyCount > snapshot.rows / 2) {
+            bitmap.eraseColor(terminalTheme.backgroundColor)
+            for (row in 0 until snapshot.rows) drawRow(canvas, snapshot, row)
+            drawTerminalImages(canvas, snapshot)
+            if (cursorShown) drawCursor(canvas, snapshot)
+        } else {
+            for (row in 0 until snapshot.rows) {
+                if (!dirtyRows[row]) continue
+                // Background runs overlap neighbouring rows by up to a pixel, so repaint the
+                // neighbours inside this row's clip to reproduce exactly what a full pass draws.
+                val top = verticalPadding + row * lineHeight
+                canvas.save()
+                canvas.clipRect(0f, floor(top), bitmap.width.toFloat(), ceil(top + lineHeight))
+                canvas.drawColor(terminalTheme.backgroundColor)
+                for (neighbour in (row - 1).coerceAtLeast(0)..(row + 1).coerceAtMost(snapshot.rows - 1)) {
+                    drawRow(canvas, snapshot, neighbour)
+                }
+                if (cursorRow in row - 1..row + 1) drawCursor(canvas, snapshot)
+                canvas.restore()
+            }
+        }
+
+        val rendered = previous?.takeIf { it.size == snapshot.cells.size }
+            ?: Array(snapshot.cells.size) { TerminalCell() }
+        for (index in snapshot.cells.indices) rendered[index].copyFrom(snapshot.cells[index])
+        renderedCells = rendered
+        renderedColumns = snapshot.columns
+        renderedHadImages = snapshot.images.isNotEmpty()
+        renderedCursorRow = cursorRow
+        renderedCursorColumn = snapshot.cursorColumn
+        fullRenderRequired = false
+    }
+
+    private fun drawCursor(canvas: Canvas, snapshot: TerminalSnapshot) {
+        val left = horizontalPadding + snapshot.cursorColumn * characterWidth
+        val top = verticalPadding + snapshot.cursorRow * lineHeight
+        canvas.drawRect(left, top, left + characterWidth, top + lineHeight, cursorPaint)
+    }
+
+    private fun drawRow(canvas: Canvas, snapshot: TerminalSnapshot, row: Int) {
+        val rowOffset = row * snapshot.columns
+        val top = verticalPadding + row * lineHeight
+        // Fractional font spacing can leave a one-pixel seam between adjacent background rows.
+        val backgroundTop = floor(top)
+        val backgroundBottom = ceil(top + lineHeight)
+        val baseline = top + baselineOffset
+
+        // Paint backgrounds as runs instead of issuing one draw call per terminal cell.
+        var column = 0
+        while (column < snapshot.columns) {
+            val start = column
+            val first = snapshot.cells[rowOffset + column]
+            val background = if (first.inverse) first.foreground else first.background
+            column++
+            while (column < snapshot.columns) {
+                val next = snapshot.cells[rowOffset + column]
+                val nextBackground = if (next.inverse) next.foreground else next.background
+                if (nextBackground != background) break
+                column++
+            }
+            if (background != terminalTheme.backgroundColor) {
+                backgroundPaint.color = background
+                canvas.drawRect(
+                    horizontalPadding + start * characterWidth,
+                    backgroundTop,
+                    horizontalPadding + column * characterWidth + 0.5f,
+                    backgroundBottom,
+                    backgroundPaint
+                )
+            }
+        }
+
+        column = 0
+        while (column < snapshot.columns) {
+            val cell = snapshot.cells[rowOffset + column]
+            if (cell.width == 0) {
+                column++
+                continue
+            }
+            if (cell.width > 1) {
+                drawWideGlyph(canvas, cell, column, baseline)
+                column += cell.width
+                continue
+            }
+
+            val start = column
+            val clickableLink = isClickableHyperlink(cell.hyperlink)
+            val foreground = if (clickableLink) {
+                terminalTheme.cursorColor
+            } else if (cell.inverse) {
+                cell.background
+            } else {
+                cell.foreground
+            }
+            val bold = cell.bold
+            val underline = cell.underline || clickableLink
+            var hasVisibleText = false
+            textRun.clear()
+            while (column < snapshot.columns) {
+                val next = snapshot.cells[rowOffset + column]
+                val nextClickableLink = isClickableHyperlink(next.hyperlink)
+                val nextForeground = if (nextClickableLink) {
+                    terminalTheme.cursorColor
+                } else if (next.inverse) {
+                    next.background
+                } else {
+                    next.foreground
+                }
+                if (next.width != 1 || nextForeground != foreground ||
+                    next.bold != bold || (next.underline || nextClickableLink) != underline ||
+                    next.hyperlink != cell.hyperlink
+                ) {
+                    break
+                }
+                textRun.append(next.text)
+                if (next.text != " ") hasVisibleText = true
+                column++
+            }
+            if (hasVisibleText) {
+                val left = horizontalPadding + start * characterWidth
+                val expectedWidth = (column - start) * characterWidth
+                textPaint.color = foreground
+                textPaint.typeface = terminalTypeface
+                textPaint.isFakeBoldText = bold
+                val measuredWidth = textPaint.measureText(textRun, 0, textRun.length)
+                if (measuredWidth > 0f && abs(measuredWidth - expectedWidth) > 0.5f) {
+                    canvas.save()
+                    canvas.scale(expectedWidth / measuredWidth, 1f, left, baseline)
+                    canvas.drawText(textRun, 0, textRun.length, left, baseline, textPaint)
+                    canvas.restore()
+                } else {
+                    canvas.drawText(textRun, 0, textRun.length, left, baseline, textPaint)
+                }
+            }
+            if (underline) {
+                backgroundPaint.color = foreground
+                canvas.drawRect(
+                    horizontalPadding + start * characterWidth,
+                    baseline + density,
+                    horizontalPadding + column * characterWidth,
+                    baseline + 1.5f * density,
+                    backgroundPaint
+                )
+            }
         }
     }
 
@@ -608,9 +683,22 @@ class TerminalView @JvmOverloads constructor(
         )
     }
 
+    private fun parsedHyperlink(hyperlink: String?): ParsedTerminalHyperlink? {
+        if (hyperlink == null) return null
+        parsedHyperlinks[hyperlink]?.let { return it }
+        if (parsedHyperlinks.size >= MAX_PARSED_HYPERLINKS) parsedHyperlinks.clear()
+        return ParsedTerminalHyperlink(
+            imagePath = terminalImagePathFromHyperlink(hyperlink),
+            webUrl = terminalWebUrlFromHyperlink(hyperlink)
+        ).also { parsedHyperlinks[hyperlink] = it }
+    }
+
+    private fun isClickableHyperlink(hyperlink: String?): Boolean =
+        parsedHyperlink(hyperlink)?.clickable == true
+
     private fun drawWideGlyph(canvas: Canvas, cell: TerminalCell, column: Int, baseline: Float) {
         if (cell.text == " ") return
-        val clickableLink = terminalHyperlinkIsClickable(cell.hyperlink)
+        val clickableLink = isClickableHyperlink(cell.hyperlink)
         val foreground = if (clickableLink) {
             terminalTheme.cursorColor
         } else if (cell.inverse) {
@@ -663,7 +751,7 @@ class TerminalView @JvmOverloads constructor(
             var column = 0
             while (column < snapshot.columns) {
                 val hyperlink = snapshot.cells[row * snapshot.columns + column].hyperlink
-                val remotePath = terminalImagePathFromHyperlink(hyperlink)
+                val remotePath = parsedHyperlink(hyperlink)?.imagePath
                 if (remotePath == null) {
                     column++
                     continue
@@ -698,7 +786,7 @@ class TerminalView @JvmOverloads constructor(
             var column = 0
             while (column < snapshot.columns) {
                 val hyperlink = snapshot.cells[row * snapshot.columns + column].hyperlink
-                val url = terminalWebUrlFromHyperlink(hyperlink)
+                val url = parsedHyperlink(hyperlink)?.webUrl
                 if (url == null) {
                     column++
                     continue
@@ -791,6 +879,7 @@ class TerminalView @JvmOverloads constructor(
 
     override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: android.graphics.Rect?) {
         super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
+        fullRenderRequired = true
         renderDirty = true
         invalidate()
     }
@@ -1236,6 +1325,7 @@ class TerminalView @JvmOverloads constructor(
             bitmapHeight,
             Bitmap.Config.ARGB_8888
         )
+        fullRenderRequired = true
         renderDirty = true
     }
 

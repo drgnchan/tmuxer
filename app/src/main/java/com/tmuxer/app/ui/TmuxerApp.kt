@@ -112,6 +112,8 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -198,9 +200,10 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
     val dashboardMessage by viewModel.dashboardMessage.collectAsStateWithLifecycle()
     val selectedWindow by viewModel.selectedWindow.collectAsStateWithLifecycle()
     val terminalConnected by viewModel.terminalConnected.collectAsStateWithLifecycle()
-    val ctrlActive by viewModel.ctrlActive.collectAsStateWithLifecycle()
-    val shiftActive by viewModel.shiftActive.collectAsStateWithLifecycle()
-    val altActive by viewModel.altActive.collectAsStateWithLifecycle()
+    // Modifier toggles are read only by SpecialKeyBar, so toggling one recomposes just the key bar.
+    val ctrlActive = viewModel.ctrlActive.collectAsStateWithLifecycle()
+    val shiftActive = viewModel.shiftActive.collectAsStateWithLifecycle()
+    val altActive = viewModel.altActive.collectAsStateWithLifecycle()
     val terminalTheme by viewModel.terminalTheme.collectAsStateWithLifecycle()
     val connectionRecoveryStatus by viewModel.connectionRecoveryStatus.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -2107,9 +2110,9 @@ private fun TerminalScreen(
     hostLabel: String,
     connected: Boolean,
     recovering: Boolean,
-    ctrlActive: Boolean,
-    shiftActive: Boolean,
-    altActive: Boolean,
+    ctrlActive: State<Boolean>,
+    shiftActive: State<Boolean>,
+    altActive: State<Boolean>,
     terminalTheme: TerminalTheme,
     terminalViewModel: TmuxerViewModel,
     onBack: () -> Unit,
@@ -2145,7 +2148,10 @@ private fun TerminalScreen(
             }.onFailure { terminalViewModel.showNotice("无法打开链接") }
         }
     }
-    val uploadProgress by terminalViewModel.uploadProgress.collectAsStateWithLifecycle()
+    // Progress ticks ~10 times a second; only the bubble reads the value; the rest of the screen
+    // observes whether an upload is running at all.
+    val uploadProgress = terminalViewModel.uploadProgress.collectAsStateWithLifecycle()
+    val uploading by remember { derivedStateOf { uploadProgress.value != null } }
     val filePicker = rememberLauncherForActivityResult(
         ActivityResultContracts.OpenMultipleDocuments()
     ) { uris -> terminalViewModel.uploadFiles(uris) }
@@ -2205,11 +2211,11 @@ private fun TerminalScreen(
                 )
             }
             IconButton(
-                enabled = connected && uploadProgress == null,
+                enabled = connected && !uploading,
                 onClick = { filePicker.launch(arrayOf("*/*")) },
                 modifier = Modifier.size(44.dp)
             ) {
-                if (uploadProgress == null) {
+                if (!uploading) {
                     Icon(
                         Icons.Rounded.UploadFile,
                         "上传文件",
@@ -2232,7 +2238,7 @@ private fun TerminalScreen(
                 )
             }
             IconButton(
-                enabled = connected && uploadProgress == null,
+                enabled = connected && !uploading,
                 onClick = { showExitSessionDialog = true },
                 modifier = Modifier.size(44.dp)
             ) {
@@ -2313,50 +2319,10 @@ private fun TerminalScreen(
                     }
                 }
             }
-            uploadProgress?.let { progress ->
-                Surface(
-                    modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
-                    color = RaisedSurface.copy(alpha = 0.95f),
-                    shape = CircleShape,
-                    border = BorderStroke(1.dp, Outline)
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        if (progress.fraction == null) {
-                            CircularProgressIndicator(
-                                modifier = Modifier.size(14.dp),
-                                color = Mint,
-                                strokeWidth = 2.dp
-                            )
-                        } else {
-                            CircularProgressIndicator(
-                                progress = { progress.fraction ?: 0f },
-                                modifier = Modifier.size(14.dp),
-                                color = Mint,
-                                trackColor = Outline,
-                                strokeWidth = 2.dp
-                            )
-                        }
-                        Spacer(Modifier.width(7.dp))
-                        Text(
-                            buildString {
-                                append("上传 ")
-                                if (progress.fileCount > 1) {
-                                    append(progress.fileIndex).append('/').append(progress.fileCount).append(" · ")
-                                }
-                                append(progress.fileName)
-                                progress.fraction?.let { append(" · ").append((it * 100).toInt()).append('%') }
-                            },
-                            style = MaterialTheme.typography.labelSmall,
-                            color = TextPrimary,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                }
-            }
+            UploadProgressBubble(
+                state = uploadProgress,
+                modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp)
+            )
             if (!connected && !recovering) {
                 Surface(
                     modifier = Modifier.align(Alignment.TopCenter).padding(top = 8.dp),
@@ -2566,10 +2532,57 @@ private fun WindowTab(
 }
 
 @Composable
+private fun UploadProgressBubble(state: State<FileUploadProgress?>, modifier: Modifier = Modifier) {
+    val progress = state.value ?: return
+    Surface(
+        modifier = modifier,
+        color = RaisedSurface.copy(alpha = 0.95f),
+        shape = CircleShape,
+        border = BorderStroke(1.dp, Outline)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 11.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (progress.fraction == null) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(14.dp),
+                    color = Mint,
+                    strokeWidth = 2.dp
+                )
+            } else {
+                CircularProgressIndicator(
+                    progress = { progress.fraction ?: 0f },
+                    modifier = Modifier.size(14.dp),
+                    color = Mint,
+                    trackColor = Outline,
+                    strokeWidth = 2.dp
+                )
+            }
+            Spacer(Modifier.width(7.dp))
+            Text(
+                buildString {
+                    append("上传 ")
+                    if (progress.fileCount > 1) {
+                        append(progress.fileIndex).append('/').append(progress.fileCount).append(" · ")
+                    }
+                    append(progress.fileName)
+                    progress.fraction?.let { append(" · ").append((it * 100).toInt()).append('%') }
+                },
+                style = MaterialTheme.typography.labelSmall,
+                color = TextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
 private fun SpecialKeyBar(
-    ctrlActive: Boolean,
-    shiftActive: Boolean,
-    altActive: Boolean,
+    ctrlActive: State<Boolean>,
+    shiftActive: State<Boolean>,
+    altActive: State<Boolean>,
     onControl: () -> Unit,
     onShift: () -> Unit,
     onAlt: () -> Unit,
@@ -2604,9 +2617,9 @@ private fun SpecialKeyBar(
                 .padding(horizontal = 5.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            KeyButton("Ctrl", description = "Control", active = ctrlActive, onClick = onControl)
-            KeyButton("Shift", active = shiftActive, onClick = onShift)
-            KeyButton("Alt", active = altActive, onClick = onAlt)
+            KeyButton("Ctrl", description = "Control", active = ctrlActive.value, onClick = onControl)
+            KeyButton("Shift", active = shiftActive.value, onClick = onShift)
+            KeyButton("Alt", active = altActive.value, onClick = onAlt)
             KeyButton("Tab") { onKey("\t") }
             KeyButton(
                 icon = Icons.Rounded.KeyboardArrowLeft,

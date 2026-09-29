@@ -412,6 +412,55 @@ class TerminalEmulatorTest {
         assertTrue(terminal.snapshot().images.isEmpty())
     }
 
+    @Test
+    fun scrollRegionKeepsStatusRowAndMovesTopLineToHistory() {
+        val terminal = TerminalEmulator(20, 4)
+        terminal.feed("\u001B[4;1HSTATUS\u001B[1;3rone\r\ntwo\r\nthree\r\nfour".toByteArray())
+
+        var snapshot = terminal.snapshot()
+        assertEquals(listOf("two", "three", "four", "STATUS"), (0 until 4).map { row(snapshot, it).trimEnd() })
+
+        // Screen cells handed to history must not alias cells that are still being written.
+        terminal.feed("\u001B[1;1HXX\r\n\u001B[3;1Hfive\r\n".toByteArray())
+        terminal.scroll(-2, 1, 1)
+        snapshot = terminal.snapshot()
+        assertEquals("one", row(snapshot, 0).trimEnd())
+        assertEquals("XXo", row(snapshot, 1).trimEnd())
+    }
+
+    @Test
+    fun scrollDownInsertsBlankLineAtRegionTop() {
+        val terminal = TerminalEmulator(20, 4)
+        terminal.feed("a\r\nb\r\nc\r\nd\u001B[1;3r\u001B[T".toByteArray())
+
+        val snapshot = terminal.snapshot()
+        assertEquals(listOf("", "a", "b", "d"), (0 until 4).map { row(snapshot, it).trimEnd() })
+    }
+
+    @Test
+    fun parsesSgrParametersAndIgnoresPrivateModifyOtherKeys() {
+        val terminal = TerminalEmulator(20, 4)
+        terminal.feed("\u001B[>4;1mx\u001B[1;4;38;2;1;2;3my\u001B[0mz".toByteArray())
+
+        val cells = terminal.snapshot().cells
+        assertFalse(cells[0].bold)
+        assertFalse(cells[0].underline)
+        assertTrue(cells[1].bold)
+        assertTrue(cells[1].underline)
+        assertEquals(0xFF010203.toInt(), cells[1].foreground)
+        assertFalse(cells[2].bold)
+    }
+
+    @Test
+    fun insertsAndDeletesCharactersWithinRow() {
+        val terminal = TerminalEmulator(20, 4)
+        terminal.feed("abcdef\u001B[1;2H\u001B[2P".toByteArray())
+        assertEquals("adef", row(terminal.snapshot(), 0).trimEnd())
+
+        terminal.feed("\u001B[1;2H\u001B[2@XY".toByteArray())
+        assertEquals("aXYdef", row(terminal.snapshot(), 0).trimEnd())
+    }
+
     private fun row(snapshot: TerminalSnapshot, row: Int): String =
         (0 until snapshot.columns).joinToString("") {
             snapshot.cells[row * snapshot.columns + it].text

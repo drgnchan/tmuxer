@@ -38,6 +38,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import androidx.lifecycle.AndroidViewModel
@@ -262,7 +263,8 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private var connectJob: Job? = null
     private var recoveryJob: Job? = null
     private var recoveryStatusClearJob: Job? = null
-    @Volatile private var appInForeground = false
+    private val appForeground = MutableStateFlow(false)
+    private val appInForeground: Boolean get() = appForeground.value
     @Volatile private var terminalGeneration = 0
     @Volatile private var imageCheckpoint: ImageStreamCheckpoint? = null
     private var imageStateProfileId: String? = null
@@ -274,12 +276,12 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
     private var terminalRows = 24
 
     fun onAppForegrounded() {
-        appInForeground = true
+        appForeground.value = true
         ensureConnectionRestored()
     }
 
     fun onAppBackgrounded() {
-        appInForeground = false
+        appForeground.value = false
     }
 
     private fun ensureConnectionRestored() {
@@ -564,6 +566,12 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 // The dashboard benefits from quick discovery. Inside a live terminal, polling via
                 // a second SSH channel less often reduces network contention and battery use.
                 delay(if (_screen.value == AppScreen.Terminal) 15_000 else 5_000)
+                if (!appInForeground) {
+                    // Each poll opens an SSH exec channel; don't wake the radio in the background.
+                    // Returning to the foreground already runs a connection health check.
+                    appForeground.first { it }
+                    continue
+                }
                 if (_screen.value !is AppScreen.ProfileEditor) refreshWindowsInternal()
             }
         }
