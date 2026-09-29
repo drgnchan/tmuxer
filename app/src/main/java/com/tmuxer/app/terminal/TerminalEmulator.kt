@@ -126,7 +126,11 @@ class TerminalEmulator(
     private var mainCells = freshBuffer(columns, rows)
     private var alternateCells = freshBuffer(columns, rows)
     private var useAlternate = false
-    private val scrollback = ArrayDeque<Array<TerminalCell>>()
+    // History is stored packed (see [HistoryLine]); screen rows stay as mutable TerminalCells.
+    private val scrollback = ArrayDeque<HistoryLine>()
+    private val packText = StringBuilder()
+    // Holds one row's cell references while rows rotate, so scrolling allocates no cells.
+    private var rowScratch = arrayOfNulls<TerminalCell>(columns)
     private var viewportOffset = 0
     private var mouseTracking = false
     private var sgrMouseProtocol = false
@@ -136,6 +140,15 @@ class TerminalEmulator(
     private var cursorRow = 0
     private var savedColumn = 0
     private var savedRow = 0
+    // DECSC (ESC 7) also saves rendition and charset state; CSI s saves only the position.
+    private var savedForeground = theme.foregroundColor
+    private var savedBackground = theme.backgroundColor
+    private var savedBold = false
+    private var savedUnderline = false
+    private var savedInverse = false
+    private var savedG0LineDrawing = false
+    private var savedG1LineDrawing = false
+    private var savedActiveCharsetSlot = 0
     private var scrollTop = 0
     private var scrollBottom = rows - 1
     private var cursorVisible = true
@@ -216,17 +229,24 @@ class TerminalEmulator(
             val oldBackground = theme.backgroundColor
             theme = newTheme
 
+            val newForeground = newTheme.foregroundColor
+            val newBackground = newTheme.backgroundColor
+
             fun remap(line: Array<TerminalCell>) {
                 line.forEach { cell ->
-                    if (cell.foreground == oldForeground) cell.foreground = newTheme.foregroundColor
-                    if (cell.background == oldBackground) cell.background = newTheme.backgroundColor
+                    if (cell.foreground == oldForeground) cell.foreground = newForeground
+                    if (cell.background == oldBackground) cell.background = newBackground
                 }
             }
             remap(mainCells)
             remap(alternateCells)
-            scrollback.forEach(::remap)
-            if (foreground == oldForeground) foreground = newTheme.foregroundColor
-            if (background == oldBackground) background = newTheme.backgroundColor
+            scrollback.forEach {
+                it.remapColors(oldForeground, newForeground, oldBackground, newBackground)
+            }
+            if (foreground == oldForeground) foreground = newForeground
+            if (background == oldBackground) background = newBackground
+            if (savedForeground == oldForeground) savedForeground = newForeground
+            if (savedBackground == oldBackground) savedBackground = newBackground
             changed = true
         }
         if (changed) onChanged?.invoke()
@@ -251,6 +271,14 @@ class TerminalEmulator(
             cursorVisible = true
             wrapPending = false
             resetStyle()
+            savedForeground = theme.foregroundColor
+            savedBackground = theme.backgroundColor
+            savedBold = false
+            savedUnderline = false
+            savedInverse = false
+            savedG0LineDrawing = false
+            savedG1LineDrawing = false
+            savedActiveCharsetSlot = 0
             parserState = ParserState.NORMAL
             oscSequenceOverflow = false
             charsetSequencePending = false
@@ -278,14 +306,10 @@ class TerminalEmulator(
             if (safeColumns == columns && safeRows == rows) return
             mainCells = resizedBuffer(mainCells, columns, rows, safeColumns, safeRows)
             alternateCells = resizedBuffer(alternateCells, columns, rows, safeColumns, safeRows)
-            // Showing or hiding the IME changes only row count. Rebuilding up to 2,000 transcript
-            // lines for a row-only resize is unnecessary and caused visible animation jank.
-            if (safeColumns != columns) {
-                val resizedHistory = scrollback.map { resizedLine(it, columns, safeColumns) }
-                scrollback.clear()
-                scrollback.addAll(resizedHistory)
-            }
+            // History lines are width-independent (padded or truncated when read), so resizing
+            // never rebuilds the transcript.
             columns = safeColumns
+            if (rowScratch.size < columns) rowScratch = arrayOfNulls(columns)
             rows = safeRows
             cursorColumn = cursorColumn.coerceIn(0, columns - 1)
             cursorRow = cursorRow.coerceIn(0, rows - 1)
@@ -307,12 +331,19 @@ class TerminalEmulator(
 
         if (viewportOffset > 0) {
             val firstLine = scrollback.size - viewportOffset
+            val defaultForeground = theme.foregroundColor
+            val defaultBackground = theme.backgroundColor
             for (row in 0 until rows) {
                 val sourceLine = firstLine + row
                 if (sourceLine < scrollback.size) {
-                    val historyRow = scrollback.elementAt(sourceLine.coerceAtLeast(0))
+                    val historyRow = scrollback[sourceLine.coerceAtLeast(0)]
                     for (column in 0 until columns) {
-                        copyCell(historyRow[column], visibleCells[row * columns + column])
+                        historyRow.readInto(
+                            column,
+                            visibleCells[row * columns + column],
+                            defaultForeground,
+                            defaultBackground
+                        )
                     }
                 } else {
                     val screenRow = sourceLine - scrollback.size
@@ -463,6 +494,17 @@ class TerminalEmulator(
                     kittySequenceOverflow = true
                 }
             }
+            ParserState.DCS -> when (char) {
+                // DCS payloads (tmux passthrough, sixel, XTGETTCAP) are consumed, never buffered.
+                '\u001B' -> parserState = ParserState.DCS_ESCAPE
+                CAN, SUB -> parserState = ParserState.NORMAL
+                else -> Unit
+            }
+            ParserState.DCS_ESCAPE -> parserState = when (char) {
+                '\\', CAN, SUB -> ParserState.NORMAL
+                '\u001B' -> ParserState.DCS_ESCAPE
+                else -> ParserState.DCS
+            }
             ParserState.APC_ESCAPE -> {
                 if (char == '\\') {
                     if (!kittySequenceOverflow) processKittyGraphics(sequence.toString())
@@ -495,11 +537,25 @@ class TerminalEmulator(
             pendingHighSurrogate = char
             return
         }
-        when (char) {
-            '\u001B' -> {
-                parserState = ParserState.ESCAPE
-                charsetSequencePending = false
+        when {
+            char == '\u001B' -> startEscape()
+            char < ' ' -> executeControl(char)
+            else -> {
+                val mapped = mapActiveCharset(char)
+                putText(mapped, wcWidth(mapped.codePointAt(0)))
             }
+        }
+    }
+
+    private fun startEscape() {
+        sequence.clear()
+        parserState = ParserState.ESCAPE
+        charsetSequencePending = false
+    }
+
+    /** Executes a C0 control other than ESC; used both in ground state and inside CSI. */
+    private fun executeControl(char: Char) {
+        when (char) {
             '\r' -> {
                 cursorColumn = 0
                 wrapPending = false
@@ -515,11 +571,7 @@ class TerminalEmulator(
             }
             '\u000E' -> activeCharsetSlot = 1
             '\u000F' -> activeCharsetSlot = 0
-            '\u0000', '\u0007' -> Unit
-            else -> if (char >= ' ') {
-                val mapped = mapActiveCharset(char)
-                putText(mapped, wcWidth(mapped.codePointAt(0)))
-            }
+            else -> Unit
         }
     }
 
@@ -546,18 +598,17 @@ class TerminalEmulator(
                 kittySequenceOverflow = false
                 parserState = ParserState.APC
             }
+            'P' -> parserState = ParserState.DCS
             '(', ')', '*', '+', '-', '.', '/' -> {
                 pendingCharsetSlot = if (char == '(') 0 else 1
                 charsetSequencePending = true
             }
             '7' -> {
-                savedColumn = cursorColumn
-                savedRow = cursorRow
+                saveCursorAndAttributes()
                 parserState = ParserState.NORMAL
             }
             '8' -> {
-                cursorColumn = savedColumn.coerceIn(0, columns - 1)
-                cursorRow = savedRow.coerceIn(0, rows - 1)
+                restoreCursorAndAttributes()
                 parserState = ParserState.NORMAL
             }
             'D' -> {
@@ -583,13 +634,49 @@ class TerminalEmulator(
     }
 
     private fun processCsi(char: Char) {
-        if (char.code in 0x40..0x7E) {
-            applyCsi(char)
-            sequence.clear()
-            parserState = ParserState.NORMAL
-        } else if (sequence.length < 256) {
-            sequence.append(char)
+        when {
+            char.code in 0x40..0x7E -> {
+                applyCsi(char)
+                sequence.clear()
+                parserState = ParserState.NORMAL
+            }
+            // Like xterm: ESC restarts, CAN/SUB cancel, other C0 controls execute in place.
+            char == '\u001B' -> startEscape()
+            char == CAN || char == SUB -> {
+                sequence.clear()
+                parserState = ParserState.NORMAL
+            }
+            char < ' ' -> executeControl(char)
+            char == '\u007F' -> Unit
+            sequence.length < 256 -> sequence.append(char)
         }
+    }
+
+    private fun saveCursorAndAttributes() {
+        savedColumn = cursorColumn
+        savedRow = cursorRow
+        savedForeground = foreground
+        savedBackground = background
+        savedBold = bold
+        savedUnderline = underline
+        savedInverse = inverse
+        savedG0LineDrawing = g0LineDrawing
+        savedG1LineDrawing = g1LineDrawing
+        savedActiveCharsetSlot = activeCharsetSlot
+    }
+
+    private fun restoreCursorAndAttributes() {
+        cursorColumn = savedColumn.coerceIn(0, columns - 1)
+        cursorRow = savedRow.coerceIn(0, rows - 1)
+        wrapPending = false
+        foreground = savedForeground
+        background = savedBackground
+        bold = savedBold
+        underline = savedUnderline
+        inverse = savedInverse
+        g0LineDrawing = savedG0LineDrawing
+        g1LineDrawing = savedG1LineDrawing
+        activeCharsetSlot = savedActiveCharsetSlot
     }
 
     /**
@@ -950,11 +1037,13 @@ class TerminalEmulator(
             // With a wrap pending the cursor still sits on the last glyph written.
             val previousColumn = if (wrapPending) cursorColumn else (cursorColumn - 1).coerceAtLeast(0)
             val previous = cells[index(previousColumn, cursorRow)]
-            if (previous.width == 0 && previousColumn > 0) {
-                cells[index(previousColumn - 1, cursorRow)].text += text
+            val target = if (previous.width == 0 && previousColumn > 0) {
+                cells[index(previousColumn - 1, cursorRow)]
             } else {
-                previous.text += text
+                previous
             }
+            // Bound a cell's text so an endless run of combining marks cannot grow it forever.
+            if (target.text.length + text.length <= MAX_CELL_TEXT_CHARS) target.text += text
             return
         }
         val glyphWidth = requestedWidth.coerceIn(1, 2)
@@ -1091,24 +1180,22 @@ class TerminalEmulator(
             val topStart = index(0, scrollTop)
             // tmux reserves its bottom status row and scrolls only 0..rows-2. The removed top
             // line still belongs in local transcript history whenever the region starts at row 0.
-            val recycled: Array<TerminalCell>
             if (scrollTop == 0) {
-                // Hand the top row's cells to history as-is; the rows below move by reference.
-                scrollback.addLast(buffer.copyOfRange(topStart, topStart + columns))
+                scrollback.addLast(packLine(buffer, topStart))
                 if (viewportOffset > 0) viewportOffset++
-                var evicted: Array<TerminalCell>? = null
                 while (scrollback.size > MAX_SCROLLBACK_LINES) {
-                    evicted = scrollback.removeFirst()
+                    scrollback.removeFirst()
                     viewportOffset = viewportOffset.coerceAtMost(scrollback.size)
                 }
-                recycled = evicted?.takeIf { it.size == columns } ?: Array(columns) { defaultCell() }
-            } else {
-                recycled = buffer.copyOfRange(topStart, topStart + columns)
             }
+            // Rotate the top row's cell objects to the bottom; the rows between move by reference.
+            val recycled = rowScratch
+            System.arraycopy(buffer, topStart, recycled, 0, columns)
             System.arraycopy(buffer, topStart + columns, buffer, topStart, (scrollBottom - scrollTop) * columns)
             val bottomStart = index(0, scrollBottom)
             for (column in 0 until columns) {
-                buffer[bottomStart + column] = recycled[column].also(::blankInPlace)
+                buffer[bottomStart + column] = recycled[column]!!.also(::blankInPlace)
+                recycled[column] = null
             }
         }
     }
@@ -1119,10 +1206,12 @@ class TerminalEmulator(
         repeat(count.coerceAtMost(scrollBottom - scrollTop + 1)) {
             val topStart = index(0, scrollTop)
             val bottomStart = index(0, scrollBottom)
-            val recycled = buffer.copyOfRange(bottomStart, bottomStart + columns)
+            val recycled = rowScratch
+            System.arraycopy(buffer, bottomStart, recycled, 0, columns)
             System.arraycopy(buffer, topStart, buffer, topStart + columns, (scrollBottom - scrollTop) * columns)
             for (column in 0 until columns) {
-                buffer[topStart + column] = recycled[column].also(::blankInPlace)
+                buffer[topStart + column] = recycled[column]!!.also(::blankInPlace)
+                recycled[column] = null
             }
         }
     }
@@ -1150,7 +1239,8 @@ class TerminalEmulator(
             when (val code = csiParameters[cursor]) {
                 0 -> resetStyle()
                 1 -> bold = true
-                2, 22 -> bold = false
+                // SGR 2 (faint) is not rendered; it must not cancel bold. 22 clears both.
+                22 -> bold = false
                 4 -> underline = true
                 24 -> underline = false
                 7 -> inverse = true
@@ -1237,10 +1327,57 @@ class TerminalEmulator(
     private fun freshBuffer(width: Int, height: Int) =
         Array(width * height) { defaultCell() }
 
-    private fun resizedLine(source: Array<TerminalCell>, oldWidth: Int, newWidth: Int): Array<TerminalCell> =
-        Array(newWidth) { column ->
-            if (column < oldWidth) source[column].duplicate() else defaultCell()
+    /**
+     * Packs one screen row for the transcript. Trailing cells that are indistinguishable from a
+     * default blank are dropped, and per-cell arrays that would only hold defaults are omitted.
+     */
+    private fun packLine(buffer: Array<TerminalCell>, start: Int): HistoryLine {
+        val defaultForeground = theme.foregroundColor
+        val defaultBackground = theme.backgroundColor
+        var length = columns
+        while (length > 0) {
+            val cell = buffer[start + length - 1]
+            if (cell.text != " " || cell.width != 1 || cell.foreground != defaultForeground ||
+                cell.background != defaultBackground || cell.bold || cell.underline ||
+                cell.inverse || cell.hyperlink != null
+            ) break
+            length--
         }
+        if (length == 0) return HistoryLine.EMPTY
+
+        val text = packText
+        text.setLength(0)
+        var singleChars = true
+        var uniformForeground = true
+        var uniformBackground = true
+        var plainFlags = true
+        var hasLinks = false
+        for (column in 0 until length) {
+            val cell = buffer[start + column]
+            text.append(cell.text)
+            if (cell.text.length != 1) singleChars = false
+            if (cell.foreground != defaultForeground) uniformForeground = false
+            if (cell.background != defaultBackground) uniformBackground = false
+            if (HistoryLine.flagsOf(cell) != HistoryLine.PLAIN_FLAGS) plainFlags = false
+            if (cell.hyperlink != null) hasLinks = true
+        }
+        val textEnds = if (singleChars) null else IntArray(length).also { ends ->
+            var offset = 0
+            for (column in 0 until length) {
+                offset += buffer[start + column].text.length
+                ends[column] = offset
+            }
+        }
+        return HistoryLine(
+            length = length,
+            text = text.toString(),
+            textEnds = textEnds,
+            foreground = if (uniformForeground) null else IntArray(length) { buffer[start + it].foreground },
+            background = if (uniformBackground) null else IntArray(length) { buffer[start + it].background },
+            flags = if (plainFlags) null else ByteArray(length) { HistoryLine.flagsOf(buffer[start + it]) },
+            hyperlinks = if (hasLinks) Array(length) { buffer[start + it].hyperlink } else null
+        )
+    }
 
     private fun resizedBuffer(
         source: Array<TerminalCell>,
@@ -1357,12 +1494,91 @@ class TerminalEmulator(
         val generation: Long
     )
 
+    /**
+     * One packed transcript line: about 10 bytes per stored cell instead of a TerminalCell object
+     * each. Only the first [length] cells are stored; the rest (trimmed trailing blanks, or
+     * columns beyond the width the line was written at) read back as default blanks, so the line
+     * can be shown at any terminal width. A null per-cell array means every stored cell had the
+     * default value: the theme color at packing time (so theme switches remap it for free), plain
+     * width-1 flags, no hyperlink, or exactly one UTF-16 char of [text] per cell.
+     */
+    private class HistoryLine(
+        val length: Int,
+        val text: String,
+        private val textEnds: IntArray?,
+        private val foreground: IntArray?,
+        private val background: IntArray?,
+        private val flags: ByteArray?,
+        private val hyperlinks: Array<String?>?
+    ) {
+        fun readInto(column: Int, target: TerminalCell, defaultForeground: Int, defaultBackground: Int) {
+            if (column >= length) {
+                target.blank(defaultForeground, defaultBackground, false, false, false)
+                return
+            }
+            val ends = textEnds
+            val textStart = if (ends == null) column else if (column == 0) 0 else ends[column - 1]
+            val textEnd = if (ends == null) column + 1 else ends[column]
+            assignText(target, textStart, textEnd)
+            val cellFlags = flags?.get(column)?.toInt() ?: PLAIN_FLAGS.toInt()
+            target.width = cellFlags and WIDTH_MASK
+            target.bold = cellFlags and BOLD != 0
+            target.underline = cellFlags and UNDERLINE != 0
+            target.inverse = cellFlags and INVERSE != 0
+            val foregroundColors = foreground
+            target.foreground = if (foregroundColors == null) defaultForeground else foregroundColors[column]
+            val backgroundColors = background
+            target.background = if (backgroundColors == null) defaultBackground else backgroundColors[column]
+            target.hyperlink = hyperlinks?.get(column)
+        }
+
+        /** Reuses the target's current string when it already holds the same text. */
+        private fun assignText(target: TerminalCell, start: Int, end: Int) {
+            val length = end - start
+            val current = target.text
+            if (current.length == length && current.regionMatches(0, text, start, length)) return
+            target.text = if (length == 1 && text[start].code < ASCII_STRINGS.size) {
+                ASCII_STRINGS[text[start].code]
+            } else {
+                text.substring(start, end)
+            }
+        }
+
+        fun remapColors(oldForeground: Int, newForeground: Int, oldBackground: Int, newBackground: Int) {
+            foreground?.let { colors ->
+                for (index in colors.indices) if (colors[index] == oldForeground) colors[index] = newForeground
+            }
+            background?.let { colors ->
+                for (index in colors.indices) if (colors[index] == oldBackground) colors[index] = newBackground
+            }
+        }
+
+        companion object {
+            private const val WIDTH_MASK = 0x3
+            private const val BOLD = 0x4
+            private const val UNDERLINE = 0x8
+            private const val INVERSE = 0x10
+            const val PLAIN_FLAGS: Byte = 1
+            val EMPTY = HistoryLine(0, "", null, null, null, null, null)
+
+            fun flagsOf(cell: TerminalCell): Byte = (
+                (cell.width and WIDTH_MASK) or
+                    (if (cell.bold) BOLD else 0) or
+                    (if (cell.underline) UNDERLINE else 0) or
+                    (if (cell.inverse) INVERSE else 0)
+                ).toByte()
+        }
+    }
+
     private enum class ParserState {
-        NORMAL, ESCAPE, CSI, OSC, OSC_ESCAPE, APC, APC_ESCAPE
+        NORMAL, ESCAPE, CSI, OSC, OSC_ESCAPE, APC, APC_ESCAPE, DCS, DCS_ESCAPE
     }
 
     companion object {
         private const val MAX_SCROLLBACK_LINES = 2_000
+        private const val MAX_CELL_TEXT_CHARS = 32
+        private const val CAN = '\u0018'
+        private const val SUB = '\u001A'
         private const val MAX_CSI_PARAMETERS = 256
         private val ASCII_STRINGS = Array(128) { it.toChar().toString() }
         private const val MAX_OSC_SEQUENCE_CHARS = 128 * 1024
