@@ -40,6 +40,23 @@ class TmuxNotInstalledException : Exception("远程主机尚未安装 tmux")
 class PiNotInstalledException : Exception("远程主机尚未安装 Pi")
 class NoActiveConnectionException : Exception("SSH 连接已断开")
 
+/** A server host key the user has not confirmed yet, or one that differs from the saved key. */
+class UntrustedHostKey internal constructor(
+    /** JSch's host alias: `host` on port 22, otherwise `[host]:port`. */
+    val host: String,
+    internal val key: ByteArray,
+    internal val previousKey: ByteArray?
+) {
+    val keyType: String get() = sshKeyType(key) ?: "unknown"
+    val fingerprint: String get() = sha256Fingerprint(key)
+    val previousFingerprint: String? get() = previousKey?.let(::sha256Fingerprint)
+    val changed: Boolean get() = previousKey != null
+}
+
+/** Thrown before authentication, so no password or key is sent to an unconfirmed host. */
+class UntrustedHostKeyException(val hostKey: UntrustedHostKey) :
+    Exception(if (hostKey.changed) "主机密钥已变更" else "主机密钥尚未确认")
+
 data class UploadedRemoteFile(
     val originalName: String,
     val remotePath: String,
@@ -92,6 +109,22 @@ internal fun planImageReplay(
 internal const val TMUX_FIELD_SEPARATOR = "__TMUXER_FIELD_7F3A__"
 internal const val MAX_IMAGE_STREAM_REPLAY_BYTES = 32 * 1024 * 1024
 private const val MAX_TERMINAL_IMAGE_DOWNLOAD_BYTES = 18 * 1024 * 1024
+
+internal fun sha256Fingerprint(key: ByteArray): String {
+    val digest = MessageDigest.getInstance("SHA-256").digest(key)
+    return "SHA256:" + Base64.encodeToString(digest, Base64.NO_WRAP or Base64.NO_PADDING)
+}
+
+/** Reads the algorithm name that prefixes an SSH public key blob (RFC 4253 string encoding). */
+internal fun sshKeyType(blob: ByteArray): String? {
+    if (blob.size < 4) return null
+    val length = ((blob[0].toInt() and 0xFF) shl 24) or ((blob[1].toInt() and 0xFF) shl 16) or
+        ((blob[2].toInt() and 0xFF) shl 8) or (blob[3].toInt() and 0xFF)
+    if (length !in 1..64 || 4 + length > blob.size) return null
+    return String(blob, 4, length, Charsets.US_ASCII).takeIf { name -> name.all { it in ' '..'~' } }
+}
+
+internal fun jschHostAlias(host: String, port: Int): String = if (port == 22) host else "[$host]:$port"
 
 internal fun isTmuxSessionRenamedNotification(line: String): Boolean =
     line == "%session-renamed" || line.startsWith("%session-renamed ")
@@ -161,7 +194,8 @@ class SshManager(context: Context) {
     suspend fun connect(profile: SshProfile): ConnectionInfo = withContext(Dispatchers.IO) {
         disconnectBlocking()
         val generation = synchronized(stateLock) { ++connectGeneration }
-        hostKeyRepository.resetObservation()
+        val hostAlias = jschHostAlias(profile.host, profile.port)
+        hostKeyRepository.clearRejected(hostAlias)
 
         val jsch = JSch().apply {
             hostKeyRepository = this@SshManager.hostKeyRepository
@@ -199,13 +233,18 @@ class SshManager(context: Context) {
             val keyBytes = Base64.decode(newSession.hostKey.key, Base64.DEFAULT)
             ConnectionInfo(
                 profile = profile,
-                hostKeyFingerprint = sha256Fingerprint(keyBytes),
-                newlyTrustedHost = hostKeyRepository.newlyTrusted.get()
+                hostKeyFingerprint = sha256Fingerprint(keyBytes)
             )
         } catch (error: Throwable) {
             runCatching { newSession.disconnect() }
+            hostKeyRepository.takeRejected(hostAlias)?.let { throw UntrustedHostKeyException(it) }
             throw error
         }
+    }
+
+    /** Saves [hostKey] as the trusted key for its host, replacing any previous key. */
+    suspend fun trustHostKey(hostKey: UntrustedHostKey) = withContext(Dispatchers.IO) {
+        hostKeyRepository.trust(hostKey.host, hostKey.key)
     }
 
     suspend fun listWindows(): List<TmuxWindow> = withContext(Dispatchers.IO) {
@@ -1001,11 +1040,6 @@ class SshManager(context: Context) {
 
     private data class TerminalWrite(val output: OutputStream, val bytes: ByteArray)
 
-    private fun sha256Fingerprint(key: ByteArray): String {
-        val digest = MessageDigest.getInstance("SHA-256").digest(key)
-        return "SHA256:" + Base64.encodeToString(digest, Base64.NO_WRAP or Base64.NO_PADDING)
-    }
-
     private data class CommandResult(val output: String, val error: String, val exitCode: Int)
 }
 
@@ -1096,30 +1130,46 @@ internal fun parseTmuxWindow(line: String): TmuxWindow? {
 }
 
 /** Trust-on-first-use repository: the first key is pinned; later key changes are rejected. */
+/**
+ * Host keys are trusted only after the user confirms the fingerprint. An unknown or changed key is
+ * rejected (JSch aborts before authentication) and recorded so the caller can ask the user.
+ */
 private class TofuHostKeyRepository(context: Context) : HostKeyRepository {
     private val preferences = context.getSharedPreferences("ssh_host_keys", Context.MODE_PRIVATE)
-    val newlyTrusted = AtomicBoolean(false)
+    private val rejected = HashMap<String, UntrustedHostKey>()
 
-    fun resetObservation() {
-        newlyTrusted.set(false)
+    @Synchronized
+    fun clearRejected(host: String) {
+        rejected.remove(host)
     }
 
     @Synchronized
+    fun takeRejected(host: String): UntrustedHostKey? = rejected.remove(host)
+
+    @Synchronized
+    fun trust(host: String, key: ByteArray) {
+        preferences.edit()
+            .putString(preferenceKey(host), Base64.encodeToString(key, Base64.NO_WRAP))
+            .commit()
+    }
+
+    private fun preferenceKey(host: String): String =
+        Base64.encodeToString(host.toByteArray(), Base64.NO_WRAP or Base64.URL_SAFE)
+
+    @Synchronized
     override fun check(host: String, key: ByteArray): Int {
-        val preferenceKey = Base64.encodeToString(host.toByteArray(), Base64.NO_WRAP or Base64.URL_SAFE)
-        val encoded = Base64.encodeToString(key, Base64.NO_WRAP)
-        val existing = preferences.getString(preferenceKey, null)
+        val existing = preferences.getString(preferenceKey(host), null)
+            ?.let { Base64.decode(it, Base64.NO_WRAP) }
         return when {
             existing == null -> {
-                preferences.edit().putString(preferenceKey, encoded).commit()
-                newlyTrusted.set(true)
-                HostKeyRepository.OK
+                rejected[host] = UntrustedHostKey(host, key.copyOf(), previousKey = null)
+                HostKeyRepository.NOT_INCLUDED
             }
-            MessageDigest.isEqual(
-                Base64.decode(existing, Base64.NO_WRAP),
-                key
-            ) -> HostKeyRepository.OK
-            else -> HostKeyRepository.CHANGED
+            MessageDigest.isEqual(existing, key) -> HostKeyRepository.OK
+            else -> {
+                rejected[host] = UntrustedHostKey(host, key.copyOf(), previousKey = existing)
+                HostKeyRepository.CHANGED
+            }
         }
     }
 

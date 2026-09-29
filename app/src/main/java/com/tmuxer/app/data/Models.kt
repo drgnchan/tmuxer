@@ -49,8 +49,7 @@ data class TmuxWindow(
 
 data class ConnectionInfo(
     val profile: SshProfile,
-    val hostKeyFingerprint: String,
-    val newlyTrustedHost: Boolean
+    val hostKeyFingerprint: String
 )
 
 sealed interface ConnectionState {

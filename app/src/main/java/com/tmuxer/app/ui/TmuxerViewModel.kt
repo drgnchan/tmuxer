@@ -27,6 +27,8 @@ import com.tmuxer.app.ssh.RemoteDirectoryListing
 import com.tmuxer.app.ssh.RemotePiModel
 import com.tmuxer.app.ssh.SshManager
 import com.tmuxer.app.ssh.TmuxNotInstalledException
+import com.tmuxer.app.ssh.UntrustedHostKey
+import com.tmuxer.app.ssh.UntrustedHostKeyException
 import com.tmuxer.app.terminal.TerminalEmulator
 import com.tmuxer.app.terminal.TerminalTheme
 import kotlinx.coroutines.CancellationException
@@ -161,6 +163,9 @@ internal fun nextWindowAfterSessionExit(
             .firstOrNull { it.sessionId != exitingWindow.sessionId }
 }
 
+/** A connection paused before authentication until the user confirms the server's host key. */
+data class HostKeyPrompt(val profile: SshProfile, val hostKey: UntrustedHostKey)
+
 data class FileUploadProgress(
     val fileName: String,
     val fileIndex: Int,
@@ -238,6 +243,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
 
     private val _uploadProgress = MutableStateFlow<FileUploadProgress?>(null)
     val uploadProgress = _uploadProgress.asStateFlow()
+
+    private val _hostKeyPrompt = MutableStateFlow<HostKeyPrompt?>(null)
+    val hostKeyPrompt = _hostKeyPrompt.asStateFlow()
 
     private val _notices = MutableSharedFlow<String>(extraBufferCapacity = 4)
     val notices = _notices.asSharedFlow()
@@ -414,6 +422,10 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
                 currentCoroutineContext().ensureActive()
                 lastError = error
                 sshManager.disconnect()
+                if (error is UntrustedHostKeyException) {
+                    _hostKeyPrompt.value = HostKeyPrompt(profile, error.hostKey)
+                    break
+                }
                 if (attempt < retryDelays.size && appInForeground) {
                     val retryMessage =
                         "正在自动重连（${attempt + 2}/${retryDelays.size + 1}）…"
@@ -493,18 +505,36 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             try {
                 val info = sshManager.connect(profile)
                 _connection.value = ConnectionState.Connected(info)
-                if (info.newlyTrustedHost) {
-                    _notices.tryEmit("已首次信任主机密钥 · ${info.hostKeyFingerprint}")
-                }
                 refreshWindowsInternal()
                 startAutoRefresh()
             } catch (error: Throwable) {
                 if (error is CancellationException) throw error
                 ensureActive()
                 sshManager.disconnect()
+                if (error is UntrustedHostKeyException) {
+                    _hostKeyPrompt.value = HostKeyPrompt(profile, error.hostKey)
+                }
                 _connection.value = ConnectionState.Failed(profile, friendlyError(error))
             }
         }
+    }
+
+    fun trustHostKeyAndConnect() {
+        val prompt = _hostKeyPrompt.value ?: return
+        _hostKeyPrompt.value = null
+        viewModelScope.launch {
+            sshManager.trustHostKey(prompt.hostKey)
+            connect(prompt.profile)
+        }
+    }
+
+    fun dismissHostKeyPrompt() {
+        val prompt = _hostKeyPrompt.value ?: return
+        _hostKeyPrompt.value = null
+        _connection.value = ConnectionState.Failed(
+            prompt.profile,
+            if (prompt.hostKey.changed) "主机密钥已变更，已取消连接" else "未信任主机密钥，已取消连接"
+        )
     }
 
     fun retryConnection() {
@@ -1191,6 +1221,9 @@ class TmuxerViewModel(application: Application) : AndroidViewModel(application) 
             return error.message.orEmpty()
         }
         if (error is NoActiveConnectionException) return "SSH 连接已断开，请重新连接"
+        if (error is UntrustedHostKeyException) {
+            return if (error.hostKey.changed) "主机密钥与之前保存的不一致，已阻止连接" else "请先确认主机密钥"
+        }
         if (error is UnknownHostException) return "找不到这台主机，请检查地址"
         if (error is SocketTimeoutException) return "连接超时，请检查网络和端口"
         if (error is ConnectException) return "无法连接到主机，请检查 SSH 服务"

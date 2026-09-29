@@ -206,6 +206,7 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
     val altActive = viewModel.altActive.collectAsStateWithLifecycle()
     val terminalTheme by viewModel.terminalTheme.collectAsStateWithLifecycle()
     val connectionRecoveryStatus by viewModel.connectionRecoveryStatus.collectAsStateWithLifecycle()
+    val hostKeyPrompt by viewModel.hostKeyPrompt.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
 
     LaunchedEffect(viewModel) {
@@ -309,6 +310,75 @@ fun TmuxerApp(viewModel: TmuxerViewModel) {
             hostState = snackbarHostState,
             modifier = Modifier.align(Alignment.Center).padding(horizontal = 24.dp),
             snackbar = { data -> CenteredNoticePopup(data.visuals.message) }
+        )
+    }
+
+    hostKeyPrompt?.let { prompt ->
+        HostKeyConfirmationDialog(
+            prompt = prompt,
+            onTrust = viewModel::trustHostKeyAndConnect,
+            onDismiss = viewModel::dismissHostKeyPrompt
+        )
+    }
+}
+
+@Composable
+private fun HostKeyConfirmationDialog(
+    prompt: HostKeyPrompt,
+    onTrust: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    val hostKey = prompt.hostKey
+    val hostLabel = if (prompt.profile.port == 22) prompt.profile.host
+    else "${prompt.profile.host}:${prompt.profile.port}"
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (hostKey.changed) "主机密钥已变更" else "确认主机密钥") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Text(
+                    if (hostKey.changed) {
+                        "$hostLabel 提供的密钥与之前保存的不一致。可能是服务器重装或更换了密钥，" +
+                            "也可能有人正在拦截连接。只有确认服务器确实更换了密钥时才继续。"
+                    } else {
+                        "首次连接 $hostLabel。请核对服务器指纹，确认后才会发送密码或私钥。"
+                    }
+                )
+                hostKey.previousFingerprint?.let { previous ->
+                    FingerprintLine("之前", previous)
+                }
+                FingerprintLine(if (hostKey.changed) "现在 · ${hostKey.keyType}" else hostKey.keyType, hostKey.fingerprint)
+                Text(
+                    "在服务器上核对：ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onTrust) {
+                Text(
+                    if (hostKey.changed) "信任新密钥" else "信任并连接",
+                    color = if (hostKey.changed) Amber else Mint,
+                    fontWeight = FontWeight.SemiBold
+                )
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        }
+    )
+}
+
+@Composable
+private fun FingerprintLine(label: String, fingerprint: String) {
+    Column {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = TextSecondary)
+        Text(
+            fingerprint,
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace,
+            color = TextPrimary
         )
     }
 }
