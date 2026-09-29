@@ -9,6 +9,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.Typeface
+import android.os.LocaleList
 import android.os.SystemClock
 import android.os.Trace
 import android.text.InputType
@@ -17,6 +18,7 @@ import android.util.AttributeSet
 import android.util.Log
 import android.util.LruCache
 import android.view.ActionMode
+import android.view.KeyCharacterMap
 import android.view.KeyEvent
 import android.view.Menu
 import android.view.MenuItem
@@ -36,6 +38,7 @@ import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.tmuxer.app.BuildConfig
 import com.tmuxer.app.R
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -118,6 +121,36 @@ internal fun terminalImeDeletion(
     val forwardDeletes = Character.codePointCount(text, safeCursor, deleteEnd) + (safeAfter - (deleteEnd - safeCursor))
 
     return TerminalImeDeletion(backspaces.coerceAtLeast(0), forwardDeletes)
+}
+
+/** Terminal bytes for a hardware key: Ctrl maps to C0 controls as xterm does, Alt adds ESC. */
+internal fun terminalHardwareKeyInput(codePoint: Int, ctrl: Boolean, alt: Boolean): String {
+    val base = if (ctrl) {
+        when (codePoint) {
+            in 'a'.code..'z'.code, in 'A'.code..'Z'.code -> (codePoint and 0x1F).toChar().toString()
+            ' '.code, '@'.code, '2'.code -> "\u0000"
+            '['.code, '3'.code -> "\u001B"
+            '\\'.code, '4'.code -> "\u001C"
+            ']'.code, '5'.code -> "\u001D"
+            '^'.code, '6'.code -> "\u001E"
+            '_'.code, '-'.code, '7'.code -> "\u001F"
+            '?'.code, '8'.code -> "\u007F"
+            else -> String(Character.toChars(codePoint))
+        }
+    } else {
+        String(Character.toChars(codePoint))
+    }
+    return if (alt) "\u001B$base" else base
+}
+
+private fun cjkTextLocales(): LocaleList {
+    val system = LocaleList.getDefault()
+    val preferred = system.get(0)
+    return if (preferred != null && preferred.language in setOf("zh", "ja", "ko")) {
+        system
+    } else {
+        LocaleList(Locale.SIMPLIFIED_CHINESE)
+    }
 }
 
 internal fun terminalPasteInput(text: String, bracketedPasteMode: Boolean): String {
@@ -230,16 +263,17 @@ class TerminalView @JvmOverloads constructor(
     // Ubuntu Mono does not contain.
     private val terminalTypeface =
         ResourcesCompat.getFont(context, R.font.ubuntu_mono_regular) ?: Typeface.MONOSPACE
-    private val cjkTypeface by lazy(LazyThreadSafetyMode.NONE) {
-        runCatching { Typeface.createFromFile("/system/fonts/NotoSansCJK-Regular.ttc") }
-            .getOrDefault(Typeface.DEFAULT)
-    }
+    // Loading NotoSansCJK-Regular.ttc directly picks its first face (Japanese glyph forms) and
+    // the file name varies by ROM. The system fallback chain plus a CJK text locale selects the
+    // right regional face instead (see cjkTextLocales).
+    private val cjkTypeface = Typeface.DEFAULT
     private val emojiTypeface by lazy(LazyThreadSafetyMode.NONE) {
         runCatching { Typeface.createFromFile("/system/fonts/NotoColorEmoji.ttf") }
             .getOrDefault(Typeface.DEFAULT)
     }
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG).apply {
         typeface = terminalTypeface
+        textLocales = cjkTextLocales()
         textSize = 13f * resources.displayMetrics.scaledDensity
         color = TERMINAL_DEFAULT_FOREGROUND
         isSubpixelText = true
@@ -1474,13 +1508,13 @@ class TerminalView @JvmOverloads constructor(
             onInput(it)
             return true
         }
-        val unicode = event.unicodeChar
-        if (unicode > 0) {
-            val char = unicode.toChar()
-            onInput(
-                if (event.isCtrlPressed) ((char.code and 0x1F).toChar()).toString()
-                else char.toString()
-            )
+        // Key maps usually define no character for Ctrl/Alt chords, so resolve the base character
+        // without those modifiers and apply terminal semantics (control code, ESC prefix) here.
+        val unicode = event.getUnicodeChar(
+            event.metaState and (KeyEvent.META_CTRL_MASK or KeyEvent.META_ALT_MASK).inv()
+        )
+        if (unicode > 0 && unicode and KeyCharacterMap.COMBINING_ACCENT == 0) {
+            onInput(terminalHardwareKeyInput(unicode, event.isCtrlPressed, event.isAltPressed))
             return true
         }
         return super.onKeyDown(keyCode, event)

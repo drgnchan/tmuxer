@@ -70,7 +70,9 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.github.mwiede:jsch:0.2.21")
-    implementation("net.i2p.crypto:eddsa:0.3.0")
+    // JSch's base (pre-Java 15) classes, which Android runs, implement ssh-ed25519 and
+    // curve25519 through Bouncy Castle; without it ed25519 keys cannot authenticate.
+    implementation("org.bouncycastle:bcprov-jdk18on:1.86")
 
     testImplementation("junit:junit:4.13.2")
 }

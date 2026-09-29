@@ -95,4 +95,15 @@ class TerminalImeInputTest {
             terminalPasteInput("first\r\nsecond\rthird", bracketedPasteMode = true)
         )
     }
+
+    @Test
+    fun mapsHardwareCtrlAndAltChords() {
+        assertEquals("\u0003", terminalHardwareKeyInput('c'.code, ctrl = true, alt = false))
+        assertEquals("\u0003", terminalHardwareKeyInput('C'.code, ctrl = true, alt = false))
+        assertEquals("\u0000", terminalHardwareKeyInput(' '.code, ctrl = true, alt = false))
+        assertEquals("\u001B", terminalHardwareKeyInput('['.code, ctrl = true, alt = false))
+        assertEquals("\u001Bb", terminalHardwareKeyInput('b'.code, ctrl = false, alt = true))
+        assertEquals("\u001B\u0018", terminalHardwareKeyInput('x'.code, ctrl = true, alt = true))
+        assertEquals("你", terminalHardwareKeyInput('你'.code, ctrl = false, alt = false))
+    }
 }

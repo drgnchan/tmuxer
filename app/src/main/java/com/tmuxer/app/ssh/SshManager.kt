@@ -126,6 +126,25 @@ internal fun sshKeyType(blob: ByteArray): String? {
 
 internal fun jschHostAlias(host: String, port: Int): String = if (port == 22) host else "[$host]:$port"
 
+private val HOST_KEY_ALGORITHMS = listOf(
+    "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
+    "rsa-sha2-512", "rsa-sha2-256", "ssh-rsa"
+)
+
+/**
+ * Like OpenSSH, prefer the algorithm of the key already trusted for a host. Otherwise a server
+ * offering several host keys could negotiate a different one (for example ed25519 once it became
+ * available) and be reported as a changed key.
+ */
+internal fun preferredHostKeyAlgorithms(trustedKeyType: String?): String {
+    val preferred = when (trustedKeyType) {
+        null -> emptyList()
+        "ssh-rsa" -> listOf("rsa-sha2-512", "rsa-sha2-256", "ssh-rsa")
+        else -> listOf(trustedKeyType).filter { it in HOST_KEY_ALGORITHMS }
+    }
+    return (preferred + HOST_KEY_ALGORITHMS.filterNot { it in preferred }).joinToString(",")
+}
+
 internal fun isTmuxSessionRenamedNotification(line: String): Boolean =
     line == "%session-renamed" || line.startsWith("%session-renamed ")
 
@@ -209,13 +228,14 @@ class SshManager(context: Context) {
             )
         }
 
+        val hostKeyAlgorithms = preferredHostKeyAlgorithms(hostKeyRepository.trustedKeyType(hostAlias))
         val newSession = jsch.getSession(profile.username, profile.host, profile.port).apply {
             if (profile.authType == AuthType.PASSWORD) setPassword(profile.password)
             setConfig(
                 Properties().apply {
                     put("StrictHostKeyChecking", "yes")
                     put("PreferredAuthentications", preferredAuthentication(profile))
-                    put("server_host_key", "ssh-ed25519,ecdsa-sha2-nistp256,ecdsa-sha2-nistp384,ecdsa-sha2-nistp521,rsa-sha2-512,rsa-sha2-256,ssh-rsa")
+                    put("server_host_key", hostKeyAlgorithms)
                 }
             )
             serverAliveInterval = 15_000
@@ -1145,6 +1165,10 @@ private class TofuHostKeyRepository(context: Context) : HostKeyRepository {
 
     @Synchronized
     fun takeRejected(host: String): UntrustedHostKey? = rejected.remove(host)
+
+    @Synchronized
+    fun trustedKeyType(host: String): String? = preferences.getString(preferenceKey(host), null)
+        ?.let { runCatching { sshKeyType(Base64.decode(it, Base64.NO_WRAP)) }.getOrNull() }
 
     @Synchronized
     fun trust(host: String, key: ByteArray) {

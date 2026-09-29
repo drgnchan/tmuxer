@@ -349,7 +349,7 @@ private fun HostKeyConfirmationDialog(
                 }
                 FingerprintLine(if (hostKey.changed) "现在 · ${hostKey.keyType}" else hostKey.keyType, hostKey.fingerprint)
                 Text(
-                    "在服务器上核对：ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub",
+                    "在服务器上核对：ssh-keygen -lf /etc/ssh/${hostKeyFileName(hostKey.keyType)}",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
@@ -368,6 +368,13 @@ private fun HostKeyConfirmationDialog(
             TextButton(onClick = onDismiss) { Text("取消") }
         }
     )
+}
+
+private fun hostKeyFileName(keyType: String): String = when {
+    keyType == "ssh-ed25519" -> "ssh_host_ed25519_key.pub"
+    keyType.startsWith("ecdsa-") -> "ssh_host_ecdsa_key.pub"
+    keyType == "ssh-rsa" -> "ssh_host_rsa_key.pub"
+    else -> "ssh_host_*_key.pub"
 }
 
 @Composable
@@ -664,9 +671,10 @@ private fun ProfileEditorScreen(
     var port by rememberSaveable(profile?.id) { mutableStateOf((profile?.port ?: 22).toString()) }
     var username by rememberSaveable(profile?.id) { mutableStateOf(profile?.username.orEmpty()) }
     var authType by rememberSaveable(profile?.id) { mutableStateOf(profile?.authType ?: AuthType.PASSWORD) }
-    var password by rememberSaveable(profile?.id) { mutableStateOf(profile?.password.orEmpty()) }
-    var privateKey by rememberSaveable(profile?.id) { mutableStateOf(profile?.privateKey.orEmpty()) }
-    var passphrase by rememberSaveable(profile?.id) { mutableStateOf(profile?.passphrase.orEmpty()) }
+    // Secrets stay out of the saved-instance Bundle, which is held by the system process.
+    var password by remember(profile?.id) { mutableStateOf(profile?.password.orEmpty()) }
+    var privateKey by remember(profile?.id) { mutableStateOf(profile?.privateKey.orEmpty()) }
+    var passphrase by remember(profile?.id) { mutableStateOf(profile?.passphrase.orEmpty()) }
     var revealPassword by rememberSaveable { mutableStateOf(false) }
     var error by rememberSaveable { mutableStateOf<String?>(null) }
     var deleteConfirmation by remember { mutableStateOf(false) }
